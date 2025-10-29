@@ -50,11 +50,37 @@ def source_snippet(path: str, line: int, context: int = 3, language: str = "cpp"
         warn(f"Source not available: {path}")
         return
     total = len(lines)
-    if line < 1 or line > total:
-        warn(f"Invalid source location: {path}:{line}")
-        return
-    start = max(1, line - context)
-    end = min(total, line + context)
+    # Clamp line into valid range, warn if it was out of bounds
+    clamped = max(1, min(line, total))
+    if clamped != line:
+        warn(f"Adjusted source location: {path}:{line} -> {clamped}")
+    start = max(1, clamped - context)
+    end = min(total, clamped + context)
     code = "".join(lines[start - 1 : end])
-    syn = Syntax(code, language, line_numbers=True, line_numbers_start=start, highlight_lines={line}, word_wrap=False)
-    console.print(Panel(syn, title=f"{path}:{line}"))
+    syn = Syntax(code, language, line_numbers=True, line_numbers_start=start, highlight_lines={clamped}, word_wrap=False)
+    console.print(Panel(syn, title=f"{path}:{clamped}"))
+
+
+def render_backtrace(lines: Iterable[str]) -> None:
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    table.add_column("#", style="cyan", width=4)
+    table.add_column("Function", style="bold")
+    table.add_column("Location", style="green")
+    for line in lines:
+        # expected shape: "#0  func at file:line" or "#0  func"
+        idx = "?"
+        func = line
+        loc = ""
+        try:
+            if line.startswith("#"):
+                parts = line.split("  ", 1)
+                if len(parts) == 2:
+                    idx_part, rest = parts
+                    idx = idx_part[1:].strip()
+                    func = rest
+            if " at " in func:
+                func, loc = func.split(" at ", 1)
+        except Exception:
+            pass
+        table.add_row(idx, func.strip(), loc.strip())
+    console.print(table)

@@ -24,6 +24,14 @@ This roadmap sequences work from a usable MVP to advanced features. Timelines ar
 - Source path remapping rules
 - Solid error messages and hints
 
+## Milestone 2.5 — Git-Aware Analysis
+
+- Add `analyze` commands: start/stop/report/clear/export
+- LLDB adapter tracing hook for stops/steps; bridge support included
+- Git integration via CLI (diff/log) to compute recently modified lines
+- Intersect executed lines with recency windows (`--since`, `--days`, `--commits`)
+- Reports with grouping (file/function) and optional source snippets
+
 ## Milestone 3 — Windows Deep Dive
 
 - Optional CDB/WinDbg adapter to maximize PDB/Windows features
@@ -45,4 +53,3 @@ This roadmap sequences work from a usable MVP to advanced features. Timelines ar
 - Building projects (we assume you build separately, e.g., MSBuild/CMake)
 - Kernel-mode debugging
 - Remote debugging (considered later via adapter support)
-

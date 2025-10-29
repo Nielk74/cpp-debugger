@@ -23,7 +23,10 @@ cwd: "C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1"
 debugger: lldb   # try lldb first; fallback to gdb
 symbols:
   - "C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1\\x64\\Debug"
-sourcePaths: []
+sourcePaths:
+  - "C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1"  # search root(s) for sources
+sourceMap:
+  - { from: "D:/agent/_work/1/s/ConsoleApplication1", to: "C:/Users/Antoine/source/repos/ConsoleApplication1" }
 ```
 
 ## Debugger Backends on Windows
@@ -57,3 +60,6 @@ $env:_NT_SYMBOL_PATH = "srv*C:\\symbols*https://msdl.microsoft.com/download/symb
 - If source paths are wrong (e.g., different machine), use `sourcePaths` remapping rules in `debuger.yaml`.
 - Ensure you build with debug info: MSVC `/Zi` (Program Database), and do not strip symbols.
 
+## Source Remapping
+
+If binaries contain absolute paths from another machine (e.g., CI), use `sourceMap` to rewrite prefixes, and `sourcePaths` as fallback search roots. The CLI applies `sourceMap` first, then tries `sourcePaths` to locate files before showing code snippets.

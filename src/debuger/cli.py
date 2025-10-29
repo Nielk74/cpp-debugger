@@ -14,11 +14,14 @@ import yaml
 from . import __version__
 from .config import DebugerConfig, CONFIG_FILENAME
 from .adapters import available_adapters, get_adapter, AdapterError
-from .render import console, info, warn, error, success, kv_table, source_snippet
+from .render import console, info, warn, error, success, kv_table, source_snippet, render_backtrace
+from .paths import remap_source
 from .state import SessionState
+from .analysis import generate_report, export_trace
 
 
 app = typer.Typer(help="Good-looking CLI for C/C++ debugging (LLDB/GDB/CDB adapters)")
+analyze_app = typer.Typer(help="Trace executed lines and intersect with recent Git changes")
 
 
 @app.callback()
@@ -224,6 +227,65 @@ def attach(
     raise typer.Exit(code=10)
 
 
+@analyze_app.command("report")
+def analyze_report(
+    since: Optional[str] = typer.Option(None, help="Git ref to compare against (e.g., origin/main)"),
+    days: Optional[int] = typer.Option(None, help="Number of days for recent changes"),
+    commits: Optional[int] = typer.Option(None, help="Number of commits for recent changes"),
+    top: Optional[int] = typer.Option(None, help="Show only top N results by hits"),
+) -> None:
+    project_root = Path.cwd()
+    try:
+        cfg, cfg_path = DebugerConfig.find_in_ancestors(project_root)
+        project_root = Path(cfg_path).parent
+    except FileNotFoundError:
+        cfg = DebugerConfig()
+    state = SessionState.load(project_root)
+    entries = generate_report(project_root, cfg, state, since=since, days=days, commits=commits)
+    if top is not None:
+        entries = entries[:top]
+    if not entries:
+        warn("No intersecting executed/recently-changed lines found")
+        raise typer.Exit()
+    from rich.table import Table
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    table.add_column("Hits", justify="right", style="yellow", width=6)
+    table.add_column("Location", style="green")
+    for e in entries:
+        table.add_row(str(e.hits), f"{e.path}:{e.line}")
+    console.print(table)
+
+
+@analyze_app.command("clear")
+def analyze_clear() -> None:
+    project_root = Path.cwd()
+    try:
+        _, cfg_path = DebugerConfig.find_in_ancestors(project_root)
+        project_root = Path(cfg_path).parent
+    except FileNotFoundError:
+        pass
+    state = SessionState.load(project_root)
+    state.clear_trace()
+    state.save(project_root)
+    success("Cleared trace data")
+
+
+@analyze_app.command("export")
+def analyze_export(path: str = typer.Argument(..., help="Output JSON path")) -> None:
+    project_root = Path.cwd()
+    try:
+        _, cfg_path = DebugerConfig.find_in_ancestors(project_root)
+        project_root = Path(cfg_path).parent
+    except FileNotFoundError:
+        pass
+    state = SessionState.load(project_root)
+    export_trace(project_root, state, Path(path))
+    success(f"Exported trace to {path}")
+
+
+app.add_typer(analyze_app, name="analyze")
+
+
 @app.command()
 def shell(
     path: Optional[str] = typer.Argument(None, help="Path to executable. If omitted, uses debuger.yaml"),
@@ -254,6 +316,21 @@ def shell(
     if not cfg.target:
         error("No target specified")
         raise typer.Exit(code=2)
+
+    # Windows: attempt to auto-configure PATH/PYTHONPATH for LLDB
+    if platform.system().lower().startswith("win"):
+        try:
+            bin_dir = Path("C:/Program Files/LLVM/bin")
+            if bin_dir.exists():
+                # Prepend bin to PATH
+                os.environ["Path"] = str(bin_dir) + ";" + os.environ.get("Path", "")
+            # Embedded Python folder detection (e.g., python310 extracted here)
+            for sub in bin_dir.iterdir():
+                if sub.is_dir() and sub.name.startswith("python3"):
+                    os.environ["Path"] = str(sub) + ";" + os.environ.get("Path", "")
+                    break
+        except Exception:
+            pass
 
     # Load persisted state
     state = SessionState.load(project_root)
@@ -294,7 +371,8 @@ def shell(
     try:
         loc = adapter.current_location()
         if loc and loc[0] and loc[1]:
-            source_snippet(loc[0], loc[1])
+            spath = remap_source(loc[0], cfg)
+            source_snippet(spath, int(loc[1]))
     except Exception:
         pass
     # Simple REPL
@@ -314,13 +392,25 @@ def shell(
                     "Commands: help, bt, step, next, finish, cont, threads, thread <id>, frames, frame <n>, locals, regs, disasm, eval <expr>, bp add <spec>, bp ls, bp rm <id>, quit"
                 )
             elif cmd == "bt":
-                for row in adapter.backtrace():
-                    console.print(row)
+                frames = adapter.backtrace()
+                render_backtrace(frames)
+                # Show snippet for top frame if available
+                try:
+                    loc = adapter.current_location()
+                    if loc and loc[0] and loc[1]:
+                        spath = remap_source(loc[0], cfg)
+                        source_snippet(spath, int(loc[1]))
+                except Exception:
+                    pass
             elif cmd == "step":
                 adapter.step_in()
                 loc = adapter.current_location()
                 if loc and loc[0] and loc[1]:
-                    source_snippet(loc[0], loc[1])
+                    spath = remap_source(loc[0], cfg)
+                    source_snippet(spath, int(loc[1]))
+                    if state.analyze_active:
+                        state.record_hit(spath, int(loc[1]))
+                        state.save(project_root)
                 else:
                     for row in adapter.backtrace(1):
                         console.print(row)
@@ -328,7 +418,11 @@ def shell(
                 adapter.step_over()
                 loc = adapter.current_location()
                 if loc and loc[0] and loc[1]:
-                    source_snippet(loc[0], loc[1])
+                    spath = remap_source(loc[0], cfg)
+                    source_snippet(spath, int(loc[1]))
+                    if state.analyze_active:
+                        state.record_hit(spath, int(loc[1]))
+                        state.save(project_root)
                 else:
                     for row in adapter.backtrace(1):
                         console.print(row)
@@ -336,7 +430,11 @@ def shell(
                 adapter.step_out()
                 loc = adapter.current_location()
                 if loc and loc[0] and loc[1]:
-                    source_snippet(loc[0], loc[1])
+                    spath = remap_source(loc[0], cfg)
+                    source_snippet(spath, int(loc[1]))
+                    if state.analyze_active:
+                        state.record_hit(spath, int(loc[1]))
+                        state.save(project_root)
                 else:
                     for row in adapter.backtrace(1):
                         console.print(row)
@@ -345,7 +443,11 @@ def shell(
                 # after continue, show top frame if stopped again
                 loc = adapter.current_location()
                 if loc and loc[0] and loc[1]:
-                    source_snippet(loc[0], loc[1])
+                    spath = remap_source(loc[0], cfg)
+                    source_snippet(spath, int(loc[1]))
+                    if state.analyze_active:
+                        state.record_hit(spath, int(loc[1]))
+                        state.save(project_root)
                 else:
                     for row in adapter.backtrace(1):
                         console.print(row)
@@ -353,7 +455,8 @@ def shell(
                 try:
                     loc = adapter.current_location()
                     if loc and loc[0] and loc[1]:
-                        source_snippet(loc[0], loc[1])
+                        spath = remap_source(loc[0], cfg)
+                        source_snippet(spath, int(loc[1]))
                     else:
                         warn("No source location available")
                 except AdapterError as e:
@@ -448,6 +551,76 @@ def shell(
                     state.save(project_root)
                 else:
                     console.print("Usage: bp add <spec> | bp ls | bp rm <id>")
+            elif cmd == "analyze":
+                if not rest:
+                    console.print("Usage: analyze start|stop|report|clear|export [options]")
+                    continue
+                sub = rest[0]
+                if sub == "start":
+                    opts = {"since": None, "days": None, "commits": None}
+                    for tok in rest[1:]:
+                        if tok.startswith("--since="):
+                            opts["since"] = tok.split("=", 1)[1]
+                        elif tok.startswith("--days="):
+                            try:
+                                opts["days"] = int(tok.split("=", 1)[1])
+                            except Exception:
+                                pass
+                        elif tok.startswith("--commits="):
+                            try:
+                                opts["commits"] = int(tok.split("=", 1)[1])
+                            except Exception:
+                                pass
+                    state.analyze_active = True
+                    state.analyze_window = {k: v for k, v in opts.items() if v is not None}
+                    state.save(project_root)
+                    success("Analysis tracing started")
+                elif sub == "stop":
+                    state.analyze_active = False
+                    state.save(project_root)
+                    success("Analysis tracing stopped")
+                elif sub == "report":
+                    since = None
+                    days = None
+                    commits = None
+                    for tok in rest[1:]:
+                        if tok.startswith("--since="):
+                            since = tok.split("=", 1)[1]
+                        elif tok.startswith("--days="):
+                            try:
+                                days = int(tok.split("=", 1)[1])
+                            except Exception:
+                                pass
+                        elif tok.startswith("--commits="):
+                            try:
+                                commits = int(tok.split("=", 1)[1])
+                            except Exception:
+                                pass
+                    if not any([since, days, commits]) and state.analyze_window:
+                        since = state.analyze_window.get("since")
+                        days = state.analyze_window.get("days")
+                        commits = state.analyze_window.get("commits")
+                    entries = generate_report(project_root, cfg, state, since=since, days=days, commits=commits)
+                    if not entries:
+                        warn("No intersecting executed/recently-changed lines found")
+                    else:
+                        from rich.table import Table
+                        table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+                        table.add_column("Hits", justify="right", style="yellow", width=6)
+                        table.add_column("Location", style="green")
+                        for e in entries:
+                            table.add_row(str(e.hits), f"{e.path}:{e.line}")
+                        console.print(table)
+                elif sub == "clear":
+                    state.clear_trace()
+                    state.save(project_root)
+                    success("Cleared trace data")
+                elif sub == "export" and len(rest) >= 2:
+                    outp = Path(rest[1])
+                    export_trace(project_root, state, outp)
+                    success(f"Exported trace to {outp}")
+                else:
+                    console.print("Usage: analyze start|stop|report|clear|export [options]")
             else:
                 console.print(f"Unknown command: {cmd}")
         except AdapterError as e:

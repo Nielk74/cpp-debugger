@@ -74,4 +74,16 @@ debuger next
 debuger step
 debuger bt
 ```
+## Analysis (Planned)
+
+- `debuger analyze start [--since <ref> | --days <N> | --commits <N>]`
+  - Begin tracing executed lines on stops/steps
+- `debuger analyze stop`
+- `debuger analyze report [--top N] [--group-by file|func] [--show-context] [--format table|json]`
+- `debuger analyze clear`
+- `debuger analyze export <file.json>`
+
+Notes:
+- Uses Git CLI to compute recent-change lines; supports path remapping via `debuger.yaml`.
+- Tracing requires the integrated LLDB or bridge adapter (GDB MI support planned); lldb passthrough doesn’t support tracing.
 

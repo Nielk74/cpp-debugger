@@ -7,6 +7,7 @@ This repository includes initial docs and a working CLI skeleton with adapters a
 - Primary target: C++ on Windows, Linux, and macOS
 - Adapters: LLDB (primary), GDB (fallback), WinDbg/CDB (Windows-specific, later milestone)
 - Nice-by-default output with colors, readable backtraces, pretty-printed variables, and helpful hints
+- Git-aware analysis to surface recently changed lines you executed between breakpoints (accelerates triage on large codebases)
 
 See:
 - docs/ARCHITECTURE.md
@@ -39,6 +40,7 @@ Inside the interactive session:
 - `help` to list supported commands
 - `bt`, `step`, `next`, `finish`, `cont`
 - Breakpoints: `bp add file:line`, `bp ls`, `bp rm <id>`
+- Analysis (planned): `analyze start/stop/report --since <git-ref>` or `--days <N>` or `--commits <N>`
 
 For your Visual Studio project at `C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1`, point `debuger.yaml` at the built executable (e.g. `x64\\\\Debug\\\\ConsoleApplication1.exe`).
 
@@ -50,7 +52,10 @@ args: []
 cwd: "C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1"
 debugger: lldb
 symbols: []
-sourcePaths: []
+sourcePaths:
+  - "C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1"
+sourceMap:
+  - { from: "D:/agent/_work/1/s/ConsoleApplication1", to: "C:/Users/Antoine/source/repos/ConsoleApplication1" }
 ```
 
 ## Windows Notes
@@ -90,3 +95,14 @@ If LLDB is built against a specific Python (e.g., 3.10 or 3.11) and you don’t 
   - Minimal MI2 implementation; best with DWARF (MinGW/MSYS2)
 - WinDbg/CDB
   - Planned for deeper Windows/PDB support
+
+## Git-Aware Analysis (planned)
+
+Trace the executed source lines between two breakpoints and intersect them with Git “recently modified” lines, so you can focus on the code most likely related to a regression.
+
+Highlights:
+- Start/stop tracing between breakpoints; record (file:line) hits
+- Compare with recent changes: by `--since <ref>`, `--days N`, or `--commits N`
+- Report sorted by file/function, with context and quick jump
+
+See docs/GIT_ANALYSIS.md for design and CLI usage.

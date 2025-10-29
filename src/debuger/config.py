@@ -19,7 +19,8 @@ class DebugerConfig:
     env: Dict[str, str] = field(default_factory=dict)
     debugger: Optional[str] = None  # lldb|gdb|cdb
     symbols: List[str] = field(default_factory=list)
-    sourcePaths: List[str] = field(default_factory=list)
+    sourcePaths: List[str] = field(default_factory=list)  # search roots for sources
+    sourceMap: List[Dict[str, str]] = field(default_factory=list)  # [{from: "C:/build/src", to: "C:/dev/project/src"}, ...]
 
     @classmethod
     def from_file(cls, path: str | os.PathLike) -> "DebugerConfig":
@@ -47,9 +48,9 @@ class DebugerConfig:
             "debugger": self.debugger,
             "symbols": list(self.symbols),
             "sourcePaths": list(self.sourcePaths),
+            "sourceMap": list(self.sourceMap),
         }
 
     def save(self, path: str | os.PathLike) -> None:
         p = pathlib.Path(path)
         p.write_text(yaml.safe_dump(self.to_dict(), sort_keys=False))
-

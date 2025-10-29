@@ -45,7 +45,14 @@ This document outlines the initial architecture for `debuger`, a CLI-first debug
      - `env`: environment variables
      - `debugger`: preferred adapter (`lldb`, `gdb`, `cdb`)
      - `symbols`: extra symbol paths
-     - `sourcePaths`: path remapping rules
+- `sourcePaths`: path remapping rules
+
+7) Git + Trace Analyzer (Planned)
+   - Execution Trace Collector: records `(file:line)` hits during step/breakpoint stops
+   - Git Change Scanner: collects recently modified line ranges via `git diff`/`git log`
+   - Correlator: intersects executed lines with recent changes; outputs ranked, grouped results
+   - Storage: `.debuger/trace.json`; configurable ignore patterns
+
 
 ## Data Flow (Launch)
 
@@ -78,4 +85,3 @@ CLI → Session Manager → Adapter:
 - DAP (Debug Adapter Protocol) client compatibility to tap into more adapters.
 - Record/replay integration where supported.
 - Time-travel debugging (Windows) if CDB backend exposes it.
-

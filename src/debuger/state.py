@@ -19,6 +19,9 @@ class BreakpointEntry:
 @dataclass
 class SessionState:
     breakpoints: List[BreakpointEntry] = field(default_factory=list)
+    analyze_active: bool = False
+    analyze_window: dict = field(default_factory=dict)  # {since|days|commits}
+    trace: dict = field(default_factory=dict)  # { path: { line: count } }
 
     @classmethod
     def load(cls, root: Path) -> "SessionState":
@@ -28,7 +31,11 @@ class SessionState:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             bps = [BreakpointEntry(**bp) for bp in data.get("breakpoints", [])]
-            return cls(breakpoints=bps)
+            st = cls(breakpoints=bps)
+            st.analyze_active = bool(data.get("analyze_active", False))
+            st.analyze_window = dict(data.get("analyze_window", {}))
+            st.trace = dict(data.get("trace", {}))
+            return st
         except Exception:
             return cls()
 
@@ -36,7 +43,12 @@ class SessionState:
         dirp = root / DEFAULT_DIRNAME
         dirp.mkdir(parents=True, exist_ok=True)
         path = dirp / DEFAULT_FILENAME
-        data = {"breakpoints": [asdict(bp) for bp in self.breakpoints]}
+        data = {
+            "breakpoints": [asdict(bp) for bp in self.breakpoints],
+            "analyze_active": self.analyze_active,
+            "analyze_window": dict(self.analyze_window),
+            "trace": self.trace,
+        }
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def add_bp(self, spec: str, bp_id: Optional[int]) -> None:
@@ -49,3 +61,12 @@ class SessionState:
                 del self.breakpoints[i]
                 return
 
+    # Trace utilities
+    def record_hit(self, path: str, line: int) -> None:
+        if not path or not isinstance(line, int) or line <= 0:
+            return
+        file_map = self.trace.setdefault(path, {})
+        file_map[str(line)] = int(file_map.get(str(line), 0)) + 1
+
+    def clear_trace(self) -> None:
+        self.trace = {}
