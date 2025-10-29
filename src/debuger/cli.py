@@ -69,6 +69,17 @@ def _resolve_state(root_opt: Optional[str], state_opt: Optional[str], debug: boo
     return project_root, SessionState(), spath
 
 
+def _open_location(path: str, line: int, template: Optional[str]) -> None:
+    if not template:
+        return
+    try:
+        import subprocess
+        cmd = template.format(file=path, line=line)
+        subprocess.Popen(cmd, shell=True)
+    except Exception:
+        pass
+
+
 @app.callback()
 def _entry() -> None:
     pass
@@ -281,6 +292,8 @@ def analyze_report(
     root: Optional[str] = typer.Option(None, help="Project root to read .debuger/session.json from"),
     state: Optional[str] = typer.Option(None, help="Explicit path to .debuger/session.json"),
     debug: bool = typer.Option(False, help="Verbose state resolution logging"),
+    previews: int = typer.Option(0, help="Number of snippet previews per file (0 = table only)"),
+    open: Optional[str] = typer.Option(None, help="Editor cmd template to open top hit, e.g. 'code -g {file}:{line}'"),
 ) -> None:
     project_root, st, state_path = _resolve_state(root, state, debug)
     # Load cfg near project_root if available
@@ -298,13 +311,29 @@ def analyze_report(
     if not entries:
         warn("No intersecting executed/recently-changed lines found")
         raise typer.Exit()
-    from rich.table import Table
-    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
-    table.add_column("Hits", justify="right", style="yellow", width=6)
-    table.add_column("Location", style="green")
-    for e in entries:
-        table.add_row(str(e.hits), f"{e.path}:{e.line}")
-    console.print(table)
+    if open and entries:
+        _open_location(entries[0].path, entries[0].line, open)
+    if previews and previews > 0:
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for e in entries:
+            groups[e.path].append(e)
+        for path, els in groups.items():
+            info(f"File: {path} ({sum(x.hits for x in els)} hits)")
+            shown = 0
+            for e in els:
+                if shown >= previews:
+                    break
+                source_snippet(path, e.line)
+                shown += 1
+    else:
+        from rich.table import Table
+        table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+        table.add_column("Hits", justify="right", style="yellow", width=6)
+        table.add_column("Location", style="green")
+        for e in entries:
+            table.add_row(str(e.hits), f"{e.path}:{e.line}")
+        console.print(table)
 
 
 @analyze_app.command("clear")
@@ -612,7 +641,7 @@ def shell(
                     continue
                 sub = rest[0]
                 if sub == "start":
-                    opts = {"since": None, "days": None, "commits": None, "sweep": None}
+                    opts = {"since": None, "days": None, "commits": None, "sweep": None, "sweep_until_break": False, "max_steps": None}
                     for tok in rest[1:]:
                         if tok.startswith("--since="):
                             opts["since"] = tok.split("=", 1)[1]
@@ -631,14 +660,34 @@ def shell(
                                 opts["sweep"] = int(tok.split("=", 1)[1])
                             except Exception:
                                 pass
+                        elif tok == "--sweep-until-break":
+                            opts["sweep_until_break"] = True
+                        elif tok.startswith("--max-steps="):
+                            try:
+                                opts["max_steps"] = int(tok.split("=", 1)[1])
+                            except Exception:
+                                pass
                     state.analyze_active = True
-                    state.analyze_window = {k: v for k, v in opts.items() if k != "sweep" and v is not None}
+                    state.analyze_window = {k: v for k, v in opts.items() if k != "sweep" and v is not None and k not in ("sweep_until_break", "max_steps")}
                     state.save(project_root)
                     success("Analysis tracing started")
                     # Optional sweep: step N times, recording hits
                     if opts.get("sweep"):
                         steps = int(opts["sweep"]) or 0
-                        for i in range(steps):
+                        # Prepare simple breakpoint targets (file:line) from state
+                        bp_targets = set()
+                        for bp in state.breakpoints:
+                            spec = bp.spec
+                            if ":" in spec and spec.rsplit(":",1)[-1].isdigit():
+                                f,l = spec.rsplit(":",1)
+                                try:
+                                    bp_targets.add( (str(Path(f).resolve()), int(l)) )
+                                except Exception:
+                                    bp_targets.add( (f, int(l)) )
+                        max_steps = steps
+                        if opts.get("sweep_until_break") and opts.get("max_steps"):
+                            max_steps = min(max_steps, int(opts["max_steps"]))
+                        for i in range(max_steps):
                             try:
                                 loc = adapter.current_location()
                                 if loc and loc[0] and loc[1]:
@@ -647,6 +696,14 @@ def shell(
                                     state.record_hit(spath, line_num)
                                     if i % 50 == 0:
                                         info(f"sweep progress: {i}/{steps} at {spath}:{line_num}")
+                                    if opts.get("sweep_until_break"):
+                                        try:
+                                            cur_key = (str(Path(spath).resolve()), line_num)
+                                        except Exception:
+                                            cur_key = (spath, line_num)
+                                        if cur_key in bp_targets:
+                                            warn("Sweep stopped: reached breakpoint target")
+                                            break
                                 adapter.step_over()
                             except AdapterError:
                                 warn("Sweep stopped: adapter error during step")
@@ -654,7 +711,11 @@ def shell(
                             except Exception:
                                 break
                         state.save(project_root)
-                        success(f"Sweep completed: {min(i+1, steps)} steps")
+                        try:
+                            done = i + 1
+                        except UnboundLocalError:
+                            done = 0
+                        success(f"Sweep completed: {done} steps")
                 elif sub == "stop":
                     state.analyze_active = False
                     state.save(project_root)
@@ -663,6 +724,8 @@ def shell(
                     since = None
                     days = None
                     commits = None
+                    previews = 3
+                    open_tpl: Optional[str] = None
                     for tok in rest[1:]:
                         if tok.startswith("--since="):
                             since = tok.split("=", 1)[1]
@@ -676,6 +739,13 @@ def shell(
                                 commits = int(tok.split("=", 1)[1])
                             except Exception:
                                 pass
+                        elif tok.startswith("--previews="):
+                            try:
+                                previews = int(tok.split("=", 1)[1])
+                            except Exception:
+                                previews = 3
+                        elif tok.startswith("--open="):
+                            open_tpl = tok.split("=", 1)[1]
                     if not any([since, days, commits]) and state.analyze_window:
                         since = state.analyze_window.get("since")
                         days = state.analyze_window.get("days")
@@ -684,13 +754,21 @@ def shell(
                     if not entries:
                         warn("No intersecting executed/recently-changed lines found")
                     else:
-                        from rich.table import Table
-                        table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
-                        table.add_column("Hits", justify="right", style="yellow", width=6)
-                        table.add_column("Location", style="green")
+                        if open_tpl and entries:
+                            _open_location(entries[0].path, entries[0].line, open_tpl)
+                        # Group by file and render snippet previews for each hit
+                        from collections import defaultdict
+                        groups = defaultdict(list)
                         for e in entries:
-                            table.add_row(str(e.hits), f"{e.path}:{e.line}")
-                        console.print(table)
+                            groups[e.path].append(e)
+                        for path, els in groups.items():
+                            info(f"File: {path} ({sum(x.hits for x in els)} hits)")
+                            shown = 0
+                            for e in els:
+                                if shown >= previews:
+                                    break
+                                source_snippet(path, e.line)
+                                shown += 1
                 elif sub == "clear":
                     state.clear_trace()
                     state.save(project_root)
