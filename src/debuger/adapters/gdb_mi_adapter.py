@@ -273,3 +273,24 @@ class GdbMiAdapter(BaseAdapter):
     def select_thread(self, tid: int) -> None:
         mi = self._ensure()
         mi.cmd(f"-thread-select {tid}")
+
+    def current_location(self) -> tuple[Optional[str], Optional[int], Optional[str]]:
+        mi = self._ensure()
+        res = mi.cmd("-stack-info-frame")
+        text = "\n".join(res)
+        # crude parsing for file/fullname/line/func
+        def _get(key: str) -> Optional[str]:
+            k = key + '="'
+            idx = text.find(k)
+            if idx == -1:
+                return None
+            end = text.find('"', idx + len(k))
+            if end == -1:
+                return None
+            return text[idx + len(k) : end]
+
+        full = _get("fullname") or _get("file")
+        func = _get("func")
+        line_s = _get("line")
+        ln = int(line_s) if (line_s and line_s.isdigit()) else None
+        return (full, ln, func)

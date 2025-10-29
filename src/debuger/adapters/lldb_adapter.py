@@ -316,3 +316,21 @@ class LldbAdapter(BaseAdapter):
                 self._process.SetSelectedThread(th)
                 return
         raise AdapterError(f"thread {tid} not found")
+
+    def current_location(self) -> tuple[Optional[str], Optional[int], Optional[str]]:
+        th = self._selected_thread()
+        fr = th.GetFrameAtIndex(0)
+        le = fr.GetLineEntry()
+        fs = le.GetFileSpec()
+        func = fr.GetFunctionName() or None
+        try:
+            directory = fs.GetDirectory() if fs else None
+            filename = fs.GetFilename() if fs else None
+            if directory and filename:
+                path = f"{directory}/{filename}" if directory and filename else (filename or None)
+            else:
+                path = filename or None
+        except Exception:
+            path = None
+        line = le.GetLine() if le else 0
+        return (path, int(line) if line else None, func)

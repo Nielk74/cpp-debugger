@@ -14,7 +14,7 @@ import yaml
 from . import __version__
 from .config import DebugerConfig, CONFIG_FILENAME
 from .adapters import available_adapters, get_adapter, AdapterError
-from .render import console, info, warn, error, success, kv_table
+from .render import console, info, warn, error, success, kv_table, source_snippet
 from .state import SessionState
 
 
@@ -290,6 +290,13 @@ def shell(
         state.save(project_root)
 
     console.print("[bold green]Interactive session started[/] - type 'help' for commands. 'quit' to exit.")
+    # Show initial context if available
+    try:
+        loc = adapter.current_location()
+        if loc and loc[0] and loc[1]:
+            source_snippet(loc[0], loc[1])
+    except Exception:
+        pass
     # Simple REPL
     while True:
         try:
@@ -311,31 +318,70 @@ def shell(
                     console.print(row)
             elif cmd == "step":
                 adapter.step_in()
-                for row in adapter.backtrace(1):
-                    console.print(row)
+                loc = adapter.current_location()
+                if loc and loc[0] and loc[1]:
+                    source_snippet(loc[0], loc[1])
+                else:
+                    for row in adapter.backtrace(1):
+                        console.print(row)
             elif cmd == "next":
                 adapter.step_over()
-                for row in adapter.backtrace(1):
-                    console.print(row)
+                loc = adapter.current_location()
+                if loc and loc[0] and loc[1]:
+                    source_snippet(loc[0], loc[1])
+                else:
+                    for row in adapter.backtrace(1):
+                        console.print(row)
             elif cmd in ("finish", "stepout"):
                 adapter.step_out()
-                for row in adapter.backtrace(1):
-                    console.print(row)
+                loc = adapter.current_location()
+                if loc and loc[0] and loc[1]:
+                    source_snippet(loc[0], loc[1])
+                else:
+                    for row in adapter.backtrace(1):
+                        console.print(row)
             elif cmd in ("cont", "continue"):
                 adapter.continue_run()
                 # after continue, show top frame if stopped again
-                for row in adapter.backtrace(1):
-                    console.print(row)
+                loc = adapter.current_location()
+                if loc and loc[0] and loc[1]:
+                    source_snippet(loc[0], loc[1])
+                else:
+                    for row in adapter.backtrace(1):
+                        console.print(row)
+            elif cmd in ("ctx", "context"):
+                try:
+                    loc = adapter.current_location()
+                    if loc and loc[0] and loc[1]:
+                        source_snippet(loc[0], loc[1])
+                    else:
+                        warn("No source location available")
+                except AdapterError as e:
+                    error(str(e))
             elif cmd == "locals":
                 try:
-                    for row in adapter.locals():
-                        console.print(row)
+                    locs = adapter.locals()
+                    rows = []
+                    for item in locs:
+                        if "=" in item:
+                            name, val = item.split("=", 1)
+                            rows.append((name.strip(), val.strip()))
+                        else:
+                            rows.append((item, ""))
+                    kv_table("Locals", rows)
                 except AdapterError as e:
                     error(str(e))
             elif cmd == "regs":
                 try:
-                    for row in adapter.regs():
-                        console.print(row)
+                    regs = adapter.regs()
+                    rows = []
+                    for item in regs:
+                        if "=" in item:
+                            name, val = item.split("=", 1)
+                            rows.append((name.strip(), val.strip()))
+                        else:
+                            rows.append((item, ""))
+                    kv_table("Registers", rows)
                 except AdapterError as e:
                     error(str(e))
             elif cmd == "disasm":
