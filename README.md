@@ -42,6 +42,10 @@ Inside the interactive session:
 - Breakpoints: `bp add file:line`, `bp ls`, `bp rm <id>`
 - Analysis (planned): `analyze start/stop/report --since <git-ref>` or `--days <N>` or `--commits <N>`
 
+Git analysis quick taste (works now):
+- `analyze start --commits 50 --sweep=200` then `analyze report`
+- Or offline: `debuger analyze report --commits 50 --state "C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1\\.debuger\\session.json" --debug`
+
 For your Visual Studio project at `C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1`, point `debuger.yaml` at the built executable (e.g. `x64\\\\Debug\\\\ConsoleApplication1.exe`).
 
 Example `debuger.yaml`:
@@ -106,3 +110,25 @@ Highlights:
 - Report sorted by file/function, with context and quick jump
 
 See docs/GIT_ANALYSIS.md for design and CLI usage.
+
+### Usage & Troubleshooting
+
+- Project root and state file
+  - When launching with a target exe, `debuger shell` stores trace/state under the nearest parent containing `.git` (the target’s repo).
+  - When launching via `debuger.yaml`, the shell prefers the repo that contains `target` from the config.
+  - You can always override state resolution: use `--state <path-to-.debuger\session.json>` and `--root <project-root>` on `debuger analyze ...`.
+  - Use `--debug` to print the resolved `project_root`, `state_path`, and trace file count.
+
+- Recent changes window
+  - If your repo has no remote or `origin/main`, prefer `--commits N` or `--days N` instead of `--since origin/main`.
+  - The analyzer falls back to the last 50 commits if a `--since` ref is missing.
+
+- Sweep mode
+  - `analyze start --sweep=N` performs N step-overs from the current stop and records hits.
+  - Programs that exit quickly may complete early; add breakpoints to pause earlier.
+
+- Large line numbers from PDB
+  - Some PDBs report huge line numbers; the tool clamps recorded lines to actual file ranges so reports still match Git changes.
+
+- Windows Unicode
+  - Git output is read as UTF-8 to avoid cp1252 decode errors in PowerShell consoles.
