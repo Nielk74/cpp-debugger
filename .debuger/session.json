@@ -1,0 +1,19 @@
+{
+  "breakpoints": [],
+  "analyze_active": true,
+  "analyze_window": {},
+  "trace": {
+    "C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1\\ConsoleApplication1\\ConsoleApplication1.cpp": {
+      "15732480": 4,
+      "8": 4,
+      "9": 4,
+      "11": 4
+    },
+    "D:\\a\\_work\\1\\s\\src\\vctools\\crt\\vcstartup\\src\\startup\\exe_common.inl": {
+      "79": 4,
+      "288": 4,
+      "294": 4,
+      "295": 4
+    }
+  }
+}

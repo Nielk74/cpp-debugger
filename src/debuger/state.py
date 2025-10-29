@@ -29,7 +29,8 @@ class SessionState:
         if not path.exists():
             return cls()
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            # Use utf-8-sig to tolerate BOM from external editors/tools
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
             bps = [BreakpointEntry(**bp) for bp in data.get("breakpoints", [])]
             st = cls(breakpoints=bps)
             st.analyze_active = bool(data.get("analyze_active", False))
@@ -65,6 +66,23 @@ class SessionState:
     def record_hit(self, path: str, line: int) -> None:
         if not path or not isinstance(line, int) or line <= 0:
             return
+        # Clamp line into valid file range when possible to avoid bogus PDB line numbers
+        try:
+            from pathlib import Path
+            p = Path(path)
+            if p.exists():
+                try:
+                    # Read with tolerant encoding
+                    total = sum(1 for _ in p.open("r", encoding="utf-8", errors="replace"))
+                    if total > 0:
+                        if line < 1:
+                            line = 1
+                        elif line > total:
+                            line = total
+                except Exception:
+                    pass
+        except Exception:
+            pass
         file_map = self.trace.setdefault(path, {})
         file_map[str(line)] = int(file_map.get(str(line), 0)) + 1
 

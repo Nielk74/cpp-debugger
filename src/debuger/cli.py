@@ -24,6 +24,51 @@ app = typer.Typer(help="Good-looking CLI for C/C++ debugging (LLDB/GDB/CDB adapt
 analyze_app = typer.Typer(help="Trace executed lines and intersect with recent Git changes")
 
 
+def _resolve_state(root_opt: Optional[str], state_opt: Optional[str], debug: bool = False) -> tuple[Path, SessionState, Path]:
+    """Resolve project root and load SessionState.
+
+    Returns (project_root, state, state_path).
+    """
+    # If state path provided explicitly, prefer it
+    if state_opt:
+        spath = Path(state_opt).resolve()
+        proj = spath.parent.parent if spath.parent.name == ".debuger" else spath.parent
+        if debug:
+            info(f"Using explicit state: {spath}")
+        st = SessionState.load(proj)
+        return proj, st, spath
+
+    # Else resolve project root
+    project_root = Path(root_opt).resolve() if root_opt else Path.cwd()
+    cfg_path: Optional[Path] = None
+    try:
+        _, cfg_path = DebugerConfig.find_in_ancestors(project_root)
+        project_root = cfg_path.parent
+    except FileNotFoundError:
+        pass
+
+    # Try standard state path
+    spath = project_root / ".debuger" / "session.json"
+    if spath.exists():
+        if debug:
+            info(f"Loading state: {spath}")
+        st = SessionState.load(project_root)
+        return project_root, st, spath
+
+    # Search upwards for a .debuger/session.json
+    for d in [project_root, *project_root.parents]:
+        cand = d / ".debuger" / "session.json"
+        if cand.exists():
+            if debug:
+                info(f"Found state in ancestor: {cand}")
+            st = SessionState.load(d)
+            return d, st, cand
+
+    if debug:
+        warn("No state file found; using empty session state")
+    return project_root, SessionState(), spath
+
+
 @app.callback()
 def _entry() -> None:
     pass
@@ -233,15 +278,21 @@ def analyze_report(
     days: Optional[int] = typer.Option(None, help="Number of days for recent changes"),
     commits: Optional[int] = typer.Option(None, help="Number of commits for recent changes"),
     top: Optional[int] = typer.Option(None, help="Show only top N results by hits"),
+    root: Optional[str] = typer.Option(None, help="Project root to read .debuger/session.json from"),
+    state: Optional[str] = typer.Option(None, help="Explicit path to .debuger/session.json"),
+    debug: bool = typer.Option(False, help="Verbose state resolution logging"),
 ) -> None:
-    project_root = Path.cwd()
+    project_root, st, state_path = _resolve_state(root, state, debug)
+    # Load cfg near project_root if available
     try:
-        cfg, cfg_path = DebugerConfig.find_in_ancestors(project_root)
-        project_root = Path(cfg_path).parent
+        cfg, _cfgp = DebugerConfig.find_in_ancestors(project_root)
     except FileNotFoundError:
         cfg = DebugerConfig()
-    state = SessionState.load(project_root)
-    entries = generate_report(project_root, cfg, state, since=since, days=days, commits=commits)
+    if debug:
+        info(f"project_root={project_root}")
+        info(f"state_path={state_path}")
+        info(f"trace_files={len(st.trace)}")
+    entries = generate_report(project_root, cfg, st, since=since, days=days, commits=commits)
     if top is not None:
         entries = entries[:top]
     if not entries:
@@ -257,29 +308,17 @@ def analyze_report(
 
 
 @analyze_app.command("clear")
-def analyze_clear() -> None:
-    project_root = Path.cwd()
-    try:
-        _, cfg_path = DebugerConfig.find_in_ancestors(project_root)
-        project_root = Path(cfg_path).parent
-    except FileNotFoundError:
-        pass
-    state = SessionState.load(project_root)
-    state.clear_trace()
-    state.save(project_root)
+def analyze_clear(root: Optional[str] = typer.Option(None, help="Project root"), state: Optional[str] = typer.Option(None, help="Path to .debuger/session.json"), debug: bool = typer.Option(False, help="Verbose")) -> None:
+    project_root, st, state_path = _resolve_state(root, state, debug)
+    st.clear_trace()
+    st.save(project_root)
     success("Cleared trace data")
 
 
 @analyze_app.command("export")
-def analyze_export(path: str = typer.Argument(..., help="Output JSON path")) -> None:
-    project_root = Path.cwd()
-    try:
-        _, cfg_path = DebugerConfig.find_in_ancestors(project_root)
-        project_root = Path(cfg_path).parent
-    except FileNotFoundError:
-        pass
-    state = SessionState.load(project_root)
-    export_trace(project_root, state, Path(path))
+def analyze_export(path: str = typer.Argument(..., help="Output JSON path"), root: Optional[str] = typer.Option(None, help="Project root"), state: Optional[str] = typer.Option(None, help="Path to .debuger/session.json"), debug: bool = typer.Option(False, help="Verbose")) -> None:
+    project_root, st, state_path = _resolve_state(root, state, debug)
+    export_trace(project_root, st, Path(path))
     success(f"Exported trace to {path}")
 
 
@@ -302,13 +341,29 @@ def shell(
             error(f"Target not found: {abs_path}")
             raise typer.Exit(code=2)
         cfg = DebugerConfig(target=abs_path, debugger=debugger)
+        # Prefer saving state near the target's repository root if present
+        # Walk up from target directory to find .git
+        target_dir = Path(abs_path).parent
+        for d in [target_dir, *target_dir.parents]:
+            if (d / ".git").exists():
+                project_root = d
+                break
+        else:
+            project_root = target_dir
     else:
         try:
             cfg, cfg_path = DebugerConfig.find_in_ancestors(Path.cwd())
             info(f"Using config: {cfg_path}")
             if debugger:
                 cfg.debugger = debugger
+            # Prefer the repo containing the target, if configured
             project_root = Path(cfg_path).parent
+            if cfg.target:
+                tdir = Path(cfg.target).resolve().parent
+                for d in [tdir, *tdir.parents]:
+                    if (d / ".git").exists():
+                        project_root = d
+                        break
         except FileNotFoundError as e:
             error(str(e))
             raise typer.Exit(code=1)
@@ -557,7 +612,7 @@ def shell(
                     continue
                 sub = rest[0]
                 if sub == "start":
-                    opts = {"since": None, "days": None, "commits": None}
+                    opts = {"since": None, "days": None, "commits": None, "sweep": None}
                     for tok in rest[1:]:
                         if tok.startswith("--since="):
                             opts["since"] = tok.split("=", 1)[1]
@@ -571,10 +626,35 @@ def shell(
                                 opts["commits"] = int(tok.split("=", 1)[1])
                             except Exception:
                                 pass
+                        elif tok.startswith("--sweep="):
+                            try:
+                                opts["sweep"] = int(tok.split("=", 1)[1])
+                            except Exception:
+                                pass
                     state.analyze_active = True
-                    state.analyze_window = {k: v for k, v in opts.items() if v is not None}
+                    state.analyze_window = {k: v for k, v in opts.items() if k != "sweep" and v is not None}
                     state.save(project_root)
                     success("Analysis tracing started")
+                    # Optional sweep: step N times, recording hits
+                    if opts.get("sweep"):
+                        steps = int(opts["sweep"]) or 0
+                        for i in range(steps):
+                            try:
+                                loc = adapter.current_location()
+                                if loc and loc[0] and loc[1]:
+                                    spath = remap_source(loc[0], cfg)
+                                    line_num = int(loc[1])
+                                    state.record_hit(spath, line_num)
+                                    if i % 50 == 0:
+                                        info(f"sweep progress: {i}/{steps} at {spath}:{line_num}")
+                                adapter.step_over()
+                            except AdapterError:
+                                warn("Sweep stopped: adapter error during step")
+                                break
+                            except Exception:
+                                break
+                        state.save(project_root)
+                        success(f"Sweep completed: {min(i+1, steps)} steps")
                 elif sub == "stop":
                     state.analyze_active = False
                     state.save(project_root)

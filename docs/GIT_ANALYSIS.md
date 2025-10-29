@@ -32,6 +32,7 @@ When tracking down regressions in a large C++ codebase, many lines execute betwe
   - Record current frame `(normalized_path, line)`, increment hit counts.
   - Data structure: `{ "exec": { "C:/path/file.cpp": { "12": 3, "13": 1 } } }`
 - Trace Mode (Optional): single-step between start/end breakpoints for higher coverage (slower).
+- Interactive convenience: `analyze start --sweep=N` will single-step N times from the current stop, recording hits automatically.
 - Store at `.debuger/trace.json` within the project (merge on subsequent runs).
 
 ### Git “Recent Changes”
@@ -42,6 +43,7 @@ When tracking down regressions in a large C++ codebase, many lines execute betwe
   - `--commits <N>`: `git log -n N -p -U0`.
 - Parse hunks to build `{ file -> set(line_numbers) }`.
 - Rename handling: use `--find-renames` and map to current paths; apply `sourceMap` if needed.
+- Matching improvements: intersect by repo-relative paths when possible; otherwise, select the best candidate by longest trailing path match.
 
 ### Intersection & Report
 
@@ -75,4 +77,3 @@ When tracking down regressions in a large C++ codebase, many lines execute betwe
 - Heatmap overlay in TUI.
 - “Blame-aware” filtering: only authors of interest.
 - Confidence scoring that combines hits, recency, and call depth.
-
