@@ -13,7 +13,7 @@ Requires-Dist: PyYAML>=6.0.0
 
 A modern, good-looking CLI to debug C/C++ programs with a friendly UX, clear output, and portable backends. The goal is to give you the speed and power of native debuggers (LLDB, GDB, WinDbg/CDB) with a simple, cohesive interface that feels great in a terminal.
 
-This repository currently contains the initial documentation for architecture, CLI design, and a roadmap. Implementation will begin after validating this plan.
+This repository includes initial docs and a working CLI skeleton with adapters and an interactive shell. LLDB is the primary backend; GDB is a fallback. On Windows, if LLDB's Python API is unavailable, the CLI falls back to native `lldb.exe` (passthrough) so you can still debug.
 
 - Primary target: C++ on Windows, Linux, and macOS
 - Adapters: LLDB (primary), GDB (fallback), WinDbg/CDB (Windows-specific, later milestone)
@@ -25,18 +25,60 @@ See:
 - docs/ROADMAP.md
 - docs/INTEGRATION_WINDOWS.md
 
-## Quick Start (planned)
+## Install
 
-- `debuger init` — scaffold a `debuger.yaml` in your project
-- `debuger run` — launch under the debugger with symbols
-- `debuger attach --pid <PID>` — attach to a running process
-- `debuger bt` — print a clean backtrace
-- `debuger step` / `next` / `cont` — step control
+Requires Python 3.10+.
 
-For your Visual Studio project at `C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1`, point `debuger.yaml` at the built executable (e.g. `x64\\\\Debug\\\\ConsoleApplication1.exe`), or run with `debuger open <path-to-exe>`.
+- Editable install for development:
+  - `pip install -e .`
+- Verify:
+  - `debuger version`
+  - `debuger doctor`
 
-## Status
+## Quick Start
 
-- This is the planning and documentation phase.
-- Early implementation will target LLDB (if present) and fall back to GDB. Native Windows adapter for PDB via CDB/WinDbg comes later.
+- Initialize config in your project:
+  - `debuger init --target "C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1\\x64\\Debug\\ConsoleApplication1.exe" --debugger lldb`
+- Run diagnostics and follow hints (Windows PATH/PYTHONPATH):
+  - `debuger doctor`
+- Start an interactive session (experimental):
+  - `debuger shell` (uses `debuger.yaml`), or
+  - `debuger shell "C:\\...\\ConsoleApplication1.exe"`
+    - If LLDB Python API isn’t available, we hand off to native `lldb` so you can still debug.
 
+Inside the interactive session:
+- `help` to list supported commands
+- `bt`, `step`, `next`, `finish`, `cont`
+- Breakpoints: `bp add file:line`, `bp ls`, `bp rm <id>`
+
+For your Visual Studio project at `C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1`, point `debuger.yaml` at the built executable (e.g. `x64\\\\Debug\\\\ConsoleApplication1.exe`).
+
+Example `debuger.yaml`:
+
+```
+target: "C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1\\x64\\Debug\\ConsoleApplication1.exe"
+args: []
+cwd: "C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1"
+debugger: lldb
+symbols: []
+sourcePaths: []
+```
+
+## Windows Notes
+
+- Ensure `lldb.exe` runs: `lldb -v`
+  - If it fails with a missing DLL error, install the Microsoft Visual C++ 2015–2022 Redistributable (x64).
+- If the LLDB Python module doesn’t import on your Python version:
+  - Use passthrough `lldb` (works out of the box), or
+  - Set `PYTHONPATH` to the output of `lldb -P` (shown in `debuger doctor`), or
+  - Use Python 3.12 which often matches LLDB’s bindings.
+
+## Adapters
+
+- LLDB (primary)
+  - Python API adapter for integrated experience
+  - CLI passthrough adapter when Python bindings aren’t available
+- GDB (fallback)
+  - Minimal MI2 implementation; best with DWARF (MinGW/MSYS2)
+- WinDbg/CDB
+  - Planned for deeper Windows/PDB support

@@ -62,6 +62,25 @@ sourcePaths: []
   - Set `PYTHONPATH` to the output of `lldb -P` (shown in `debuger doctor`), or
   - Use Python 3.12 which often matches LLDB’s bindings.
 
+### Python Embedded Distribution (quick fix)
+
+If LLDB is built against a specific Python (e.g., 3.10 or 3.11) and you don’t have that runtime, you can use the Python Embedded distribution to satisfy the DLL dependency for `lldb.exe` and the LLDB Python module:
+
+- Download the embedded package that matches your LLDB’s Python version (example used here for 3.10.11):
+  - `https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip`
+- Place it under `C:\\Program Files\\LLVM\\bin` and extract it:
+  - Either extract directly into `bin` so `python310.dll` sits next to `lldb.exe`, or extract to a subfolder (e.g., `bin\\python310`) and add that folder to `PATH`.
+  - PowerShell example (subfolder):
+    - `Expand-Archive -Path "C:\\Program Files\\LLVM\\bin\\python-3.10.11-embed-amd64.zip" -DestinationPath "C:\\Program Files\\LLVM\\bin\\python310" -Force`
+    - `$env:Path = "C:\\Program Files\\LLVM\\bin\\python310" + ";" + $env:Path`
+- Set `PYTHONPATH` so LLDB can find its Python package:
+  - `$env:PYTHONPATH = (lldb -P) + ';' + ($env:PYTHONPATH -as [string])`
+  - Or: `$env:PYTHONPATH = "C:\\Program Files\\LLVM\\lib\\site-packages" + ';' + ($env:PYTHONPATH -as [string])`
+- Optional: If using the embedded distribution, edit `python310._pth` inside the extracted folder and add the LLDB site-packages path (or ensure `import site` is enabled) for more standard behavior.
+- Verify:
+  - `lldb -v` works
+  - `python -c "import sys; sys.path.insert(0, r'C:\\Program Files\\LLVM\\lib\\site-packages'); import lldb; print('OK')"`
+
 ## Adapters
 
 - LLDB (primary)

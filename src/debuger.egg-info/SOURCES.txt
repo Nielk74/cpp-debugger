@@ -5,6 +5,7 @@ src/debuger/cli.py
 src/debuger/config.py
 src/debuger/render.py
 src/debuger/session.py
+src/debuger/state.py
 src/debuger.egg-info/PKG-INFO
 src/debuger.egg-info/SOURCES.txt
 src/debuger.egg-info/dependency_links.txt
@@ -14,3 +15,4 @@ src/debuger.egg-info/top_level.txt
 src/debuger/adapters/__init__.py
 src/debuger/adapters/gdb_mi_adapter.py
 src/debuger/adapters/lldb_adapter.py
+src/debuger/adapters/lldb_cli_adapter.py
