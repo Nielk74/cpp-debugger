@@ -53,6 +53,11 @@ def detect_lldb() -> AdapterInfo:
     # Try binary on PATH
     if shutil.which("lldb") or shutil.which("lldb.exe"):
         return AdapterInfo("lldb", "LLDB", True, "lldb executable found on PATH")
+    # Common Windows install path
+    from pathlib import Path
+    lldb_exe = Path("C:/Program Files/LLVM/bin/lldb.exe")
+    if lldb_exe.exists():
+        return AdapterInfo("lldb", "LLDB", True, f"lldb executable found at {lldb_exe}")
     return AdapterInfo("lldb", "LLDB", False, "lldb not found")
 
 
@@ -69,20 +74,31 @@ def available_adapters() -> List[AdapterInfo]:
 def get_adapter(preferred: Optional[str] = None) -> BaseAdapter:
     from .lldb_adapter import LldbAdapter
     from .gdb_mi_adapter import GdbMiAdapter
+    from .lldb_cli_adapter import LldbCliAdapter
 
     pref = (preferred or "").lower() if preferred else None
     lldb_info = detect_lldb()
     gdb_info = detect_gdb()
 
     if pref == "lldb" and lldb_info.available:
-        return LldbAdapter()
+        # Prefer Python API; fall back to CLI if import fails
+        try:
+            import importlib
+            importlib.import_module("lldb")
+            return LldbAdapter()
+        except Exception:
+            return LldbCliAdapter()
     if pref == "gdb" and gdb_info.available:
         return GdbMiAdapter()
 
     if lldb_info.available:
-        return LldbAdapter()
+        try:
+            import importlib
+            importlib.import_module("lldb")
+            return LldbAdapter()
+        except Exception:
+            return LldbCliAdapter()
     if gdb_info.available:
         return GdbMiAdapter()
 
     raise AdapterError("No debugger adapter available. Install LLVM (LLDB) or MinGW (GDB).")
-
