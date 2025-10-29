@@ -132,3 +132,27 @@ See docs/GIT_ANALYSIS.md for design and CLI usage.
 
 - Windows Unicode
   - Git output is read as UTF-8 to avoid cp1252 decode errors in PowerShell consoles.
+
+### Examples
+
+- REPL (inside `debuger shell`):
+  - Start tracing with a recent-change window and sweep until the next breakpoint (cap at 500 steps):
+    - `analyze start --commits 50 --sweep=500 --sweep-until-break --max-steps=500`
+  - Grouped report with rich previews and open the top hit in VS Code:
+    - `analyze report --previews=5 --open "code -g {file}:{line}"`
+  - Minimal flow (no sweep):
+    - `analyze start --days 7`
+    - Navigate/step as usual, then `analyze report`
+  - Save and re-run later:
+    - `analyze stop`
+
+- Top-level CLI (offline report):
+  - If your state lives under the target repo:
+    - `debuger analyze report --commits 50 --previews 5 --open "code -g {file}:{line}" --state "C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1\\.debuger\\session.json" --debug`
+  - If you prefer to pass the project root (state will be resolved automatically in parents):
+    - `debuger analyze report --days 14 --previews 3 --root "C:\\Users\\Antoine\\source\\repos\\ConsoleApplication1" --debug`
+
+- Breakpoints + sweep:
+  - Add a file:line breakpoint then sweep until break:
+    - `bp add ConsoleApplication1/ConsoleApplication1.cpp:8`
+    - `analyze start --commits 50 --sweep=500 --sweep-until-break --max-steps=500`
