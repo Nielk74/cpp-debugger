@@ -225,3 +225,51 @@ class GdbMiAdapter(BaseAdapter):
     def bp_remove(self, bp_id: int) -> None:
         mi = self._ensure()
         mi.cmd(f"-break-delete {bp_id}")
+
+    # Optional features (basic or unsupported)
+    def eval(self, expr: str) -> str:
+        mi = self._ensure()
+        res = mi.cmd(f"-data-evaluate-expression {expr}")
+        text = "\n".join(res)
+        idx = text.find('value="')
+        if idx != -1:
+            end = text.find('"', idx + 7)
+            if end != -1:
+                return text[idx + 7 : end]
+        raise AdapterError("evaluation failed")
+
+    def locals(self) -> List[str]:
+        mi = self._ensure()
+        res = mi.cmd("-stack-list-variables --all-values")
+        payload = "\n".join(res)
+        vars = _parse_kv_list(payload, "variables")
+        return [f"{v.get('name','?')} = {v.get('value','?')}" for v in vars]
+
+    def regs(self) -> List[str]:
+        # Not implemented in this minimal adapter
+        raise AdapterError("registers not supported in minimal GDB adapter")
+
+    def disasm(self, around: bool = True, count: int = 32) -> List[str]:
+        mi = self._ensure()
+        # Use current frame address
+        res = mi.cmd("-data-evaluate-expression $pc")
+        text = "\n".join(res)
+        addr = None
+        idx = text.find('value="')
+        if idx != -1:
+            end = text.find('"', idx + 7)
+            if end != -1:
+                addr = text[idx + 7 : end]
+        if not addr:
+            raise AdapterError("cannot determine PC")
+        # Disassemble around PC
+        res = mi.cmd(f"-data-disassemble -s {addr} -e {addr}+{count*8} -- 1")
+        return [line for line in ("\n".join(res)).splitlines() if line.strip()]
+
+    def select_frame(self, index: int) -> None:
+        mi = self._ensure()
+        mi.cmd(f"-stack-select-frame {index}")
+
+    def select_thread(self, tid: int) -> None:
+        mi = self._ensure()
+        mi.cmd(f"-thread-select {tid}")

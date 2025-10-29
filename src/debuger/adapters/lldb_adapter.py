@@ -241,3 +241,78 @@ class LldbAdapter(BaseAdapter):
         if not self._target:
             raise AdapterError("No active target")
         self._target.BreakpointDelete(bp_id)
+
+    # Advanced features
+    def eval(self, expr: str) -> str:
+        th = self._selected_thread()
+        fr = th.GetFrameAtIndex(0)
+        val = fr.EvaluateExpression(expr)
+        if not val.IsValid():
+            raise AdapterError("evaluation failed")
+        return val.GetValue() or val.GetSummary() or str(val)
+
+    def locals(self) -> List[str]:
+        th = self._selected_thread()
+        fr = th.GetFrameAtIndex(0)
+        out: List[str] = []
+        vars = fr.GetVariables(True, True, False, True)
+        for i in range(vars.GetSize()):
+            v = vars.GetValueAtIndex(i)
+            name = v.GetName() or "?"
+            summary = v.GetSummary()
+            value = v.GetValue()
+            disp = summary or value or "?"
+            out.append(f"{name} = {disp}")
+        return out
+
+    def regs(self) -> List[str]:
+        th = self._selected_thread()
+        fr = th.GetFrameAtIndex(0)
+        out: List[str] = []
+        reg_sets = fr.GetRegisters()
+        for i in range(reg_sets.GetSize()):
+            rs = reg_sets.GetValueAtIndex(i)
+            for j in range(rs.GetNumChildren()):
+                r = rs.GetChildAtIndex(j)
+                out.append(f"{r.GetName()} = {r.GetValue()}")
+        return out
+
+    def disasm(self, around: bool = True, count: int = 32) -> List[str]:
+        th = self._selected_thread()
+        fr = th.GetFrameAtIndex(0)
+        insts = fr.GetFunction().GetInstructions(self._target)
+        out: List[str] = []
+        pc_addr = fr.GetPCAddress()
+        # Fallback if function unknown
+        if not insts or insts.GetSize() == 0:
+            insn = self._target.ReadInstructions(pc_addr, count)
+            for ins in insn:
+                out.append(str(ins))
+            return out
+        # Find index around current PC
+        idx_pc = 0
+        for idx in range(insts.GetSize()):
+            if insts.GetInstructionAtIndex(idx).GetAddress() == pc_addr:
+                idx_pc = idx
+                break
+        start = max(0, idx_pc - count // 2) if around else idx_pc
+        end = min(insts.GetSize(), start + count)
+        for idx in range(start, end):
+            ins = insts.GetInstructionAtIndex(idx)
+            prefix = "=> " if idx == idx_pc else "   "
+            out.append(prefix + str(ins))
+        return out
+
+    def select_frame(self, index: int) -> None:
+        th = self._selected_thread()
+        th.SetSelectedFrame(index)
+
+    def select_thread(self, tid: int) -> None:
+        if not self._process:
+            raise AdapterError("No active process")
+        for i in range(self._process.GetNumThreads()):
+            th = self._process.GetThreadAtIndex(i)
+            if th.GetThreadID() == tid:
+                self._process.SetSelectedThread(th)
+                return
+        raise AdapterError(f"thread {tid} not found")

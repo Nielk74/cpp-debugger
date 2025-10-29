@@ -304,7 +304,7 @@ def shell(
                 break
             elif cmd in ("help", ":help"):
                 console.print(
-                    "Commands: help, bt, step, next, finish, cont, threads, frames, bp add <spec>, bp ls, bp rm <id>, quit"
+                    "Commands: help, bt, step, next, finish, cont, threads, thread <id>, frames, frame <n>, locals, regs, disasm, eval <expr>, bp add <spec>, bp ls, bp rm <id>, quit"
                 )
             elif cmd == "bt":
                 for row in adapter.backtrace():
@@ -326,12 +326,56 @@ def shell(
                 # after continue, show top frame if stopped again
                 for row in adapter.backtrace(1):
                     console.print(row)
+            elif cmd == "locals":
+                try:
+                    for row in adapter.locals():
+                        console.print(row)
+                except AdapterError as e:
+                    error(str(e))
+            elif cmd == "regs":
+                try:
+                    for row in adapter.regs():
+                        console.print(row)
+                except AdapterError as e:
+                    error(str(e))
+            elif cmd == "disasm":
+                try:
+                    for row in adapter.disasm():
+                        console.print(row)
+                except AdapterError as e:
+                    error(str(e))
+            elif cmd == "eval" and rest:
+                expr = " ".join(rest)
+                try:
+                    console.print(adapter.eval(expr))
+                except AdapterError as e:
+                    error(str(e))
             elif cmd == "threads":
                 for row in adapter.threads():
                     console.print(row)
+            elif cmd == "thread" and rest:
+                try:
+                    tid = int(rest[0], 0)
+                except ValueError:
+                    console.print("Invalid thread id")
+                    continue
+                try:
+                    adapter.select_thread(tid)
+                except AdapterError as e:
+                    error(str(e))
             elif cmd == "frames":
                 for row in adapter.frames():
                     console.print(row)
+            elif cmd == "frame" and rest:
+                try:
+                    idx = int(rest[0])
+                except ValueError:
+                    console.print("Invalid frame index")
+                    continue
+                try:
+                    adapter.select_frame(idx)
+                except AdapterError as e:
+                    error(str(e))
             elif cmd == "bp":
                 if not rest:
                     console.print("Usage: bp add <spec> | bp ls | bp rm <id>")
