@@ -597,8 +597,18 @@ def shell(
         success("LLDB session ended")
         raise typer.Exit(code=0)
 
+    # Log adapter information
+    adapter_name = getattr(adapter, 'name', 'unknown')
+    import sys
+    sys.stderr.write(f"[debuger-cli] Using adapter: {adapter_name}\n")
+    sys.stderr.flush()
+
     try:
+        sys.stderr.write(f"[debuger-cli] Launching target: {cfg.target}\n")
+        sys.stderr.flush()
         adapter.launch(cfg.target, cfg.args, cfg.cwd, cfg.env, stop_at_entry=stop_at_entry)
+        sys.stderr.write(f"[debuger-cli] Launch returned successfully\n")
+        sys.stderr.flush()
     except AdapterError as e:
         error(str(e))
         raise typer.Exit(code=4)
@@ -609,6 +619,8 @@ def shell(
             import time
             time.sleep(0.05)  # Brief pause to let process initialize
             state_str = adapter._state_str() if hasattr(adapter, '_state_str') else "unknown"
+            sys.stderr.write(f"[debuger-cli] Process state after launch: {state_str}\n")
+            sys.stderr.flush()
             if state_str == "exited":
                 console.print("[yellow]Warning: Program exited immediately after launch[/]")
             elif state_str == "crashed":
@@ -620,16 +632,26 @@ def shell(
     try:
         # Give the process a moment to produce output
         import time
+        sys.stderr.write(f"[debuger-cli] Draining early stdio output...\n")
+        sys.stderr.flush()
         time.sleep(0.1)
         out, err = adapter.read_stdio()
         if out:
+            sys.stderr.write(f"[debuger-cli] Captured {len(out)} bytes of stdout\n")
+            sys.stderr.flush()
             console.print("[bold cyan]Program output:[/]")
             console.print(out, end="", markup=False)
         if err:
+            sys.stderr.write(f"[debuger-cli] Captured {len(err)} bytes of stderr\n")
+            sys.stderr.flush()
             console.print("[bold red]Program stderr:[/]")
             console.print(err, end="", markup=False)
-    except Exception:
-        pass
+        if not out and not err:
+            sys.stderr.write(f"[debuger-cli] No early output captured\n")
+            sys.stderr.flush()
+    except Exception as e:
+        sys.stderr.write(f"[debuger-cli] Exception during early stdio drain: {e}\n")
+        sys.stderr.flush()
 
     # Reapply saved breakpoints
     if state.breakpoints:

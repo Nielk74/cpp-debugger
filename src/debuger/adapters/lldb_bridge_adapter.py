@@ -205,7 +205,12 @@ class LldbBridgeAdapter(BaseAdapter):
 
     # BaseAdapter methods delegating to bridge
     def launch(self, target: str, args: List[str] | None = None, cwd: Optional[str] = None, env: Optional[dict] = None, stop_at_entry: bool = False) -> None:
+        import sys
+        sys.stderr.write(f"[debuger-bridge] Launching {target} via bridge adapter\n")
+        sys.stderr.flush()
         self._rpc("launch", {"target": target, "args": args, "cwd": cwd, "env": env, "stop_at_entry": stop_at_entry})
+        sys.stderr.write(f"[debuger-bridge] Launch completed successfully\n")
+        sys.stderr.flush()
 
     def attach(self, pid: int) -> None:
         self._rpc("attach", {"pid": pid})
