@@ -166,14 +166,20 @@ class LldbAdapter(BaseAdapter):
             pass
         try:
             flags = launch_info.GetLaunchFlags()
-            inherit_flag = getattr(lldb, "eLaunchFlagInheritTTY", 0)
-            disable_stdio = getattr(lldb, "eLaunchFlagDisableSTDIO", 0)
+            inherit_flag = getattr(lldb, "eLaunchFlagInheritTTY", None)
+            disable_stdio = getattr(lldb, "eLaunchFlagDisableSTDIO", None)
+
             # Capture STDIO via LLDB so we can relay it through read_stdio.
-            # Ensure STDIO is enabled and do NOT inherit the TTY.
-            if disable_stdio and (flags & disable_stdio):
+            # Ensure STDIO is NOT disabled.
+            if disable_stdio is not None and (flags & disable_stdio):
                 flags &= ~disable_stdio
-            if inherit_flag and (flags & inherit_flag):
-                flags &= ~inherit_flag
+
+            # On Windows, we may need to ENABLE InheritTTY for GetSTDOUT/ERR to work
+            # Since file redirection APIs don't exist on some LLDB builds, we rely on TTY inheritance as backup
+            if inherit_flag is not None:
+                if not (flags & inherit_flag):
+                    flags |= inherit_flag
+
             launch_info.SetLaunchFlags(flags)
         except Exception:
             # Be resilient if flags API differs across LLDB builds.
@@ -195,17 +201,22 @@ class LldbAdapter(BaseAdapter):
             self._stdout_file = out_path
             self._stderr_file = err_path
             ok_redirect = False
+
+            # Try SetStandardOutputFile/SetStandardErrorFile first
             try:
                 if hasattr(launch_info, "SetStandardOutputFile"):
-                    launch_info.SetStandardOutputFile(self._stdout_file, True)  # transfer ownership
+                    # DO NOT transfer ownership (False) - we manage the file lifecycle
+                    # Transfer ownership on Windows can cause the file to close prematurely
+                    launch_info.SetStandardOutputFile(self._stdout_file, False)
                     ok_redirect = True
                 if hasattr(launch_info, "SetStandardErrorFile"):
-                    launch_info.SetStandardErrorFile(self._stderr_file, True)
+                    launch_info.SetStandardErrorFile(self._stderr_file, False)
                     ok_redirect = True
             except Exception:
                 ok_redirect = False
+
+            # Try path-based setters if file-based failed
             if not ok_redirect:
-                # Older LLDB builds: try path-based setters
                 try:
                     if hasattr(launch_info, "SetStandardOutputPath"):
                         launch_info.SetStandardOutputPath(self._stdout_file)
@@ -215,6 +226,19 @@ class LldbAdapter(BaseAdapter):
                         ok_redirect = True
                 except Exception:
                     pass
+
+            # Last resort: Use AddOpenFileAction to manually redirect file descriptors
+            # This is the most reliable method on older LLDB builds
+            if not ok_redirect:
+                try:
+                    if hasattr(launch_info, "AddOpenFileAction"):
+                        # Redirect fd 1 (stdout) and fd 2 (stderr) to our temp files
+                        launch_info.AddOpenFileAction(1, self._stdout_file, False, True)
+                        launch_info.AddOpenFileAction(2, self._stderr_file, False, True)
+                        ok_redirect = True
+                except Exception:
+                    pass
+
             self._stdout_pos = 0
             self._stderr_pos = 0
         except Exception:
