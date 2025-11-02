@@ -545,9 +545,40 @@ class LldbAdapter(BaseAdapter):
                     sys.stderr.write(f"[debuger] State immediately after Continue(): {state_after_continue}\n")
                     sys.stderr.flush()
 
+                    # If stopped, check why (might be exception, breakpoint, etc)
+                    if state_after_continue == "stopped":
+                        th = proc.selected_thread
+                        if th and th.IsValid():
+                            immediate_stop_reason = th.GetStopReason()
+                            immediate_stop_reason_str = {
+                                lldb.eStopReasonNone: "none",
+                                lldb.eStopReasonTrace: "trace/step",
+                                lldb.eStopReasonBreakpoint: "breakpoint",
+                                lldb.eStopReasonException: "exception",
+                                lldb.eStopReasonSignal: "signal",
+                            }.get(immediate_stop_reason, f"unknown({immediate_stop_reason})")
+                            sys.stderr.write(f"[debuger] Stop reason after first Continue(): {immediate_stop_reason_str}\n")
+                            sys.stderr.flush()
+
+                            # If we hit an exception immediately, try to continue past it
+                            if immediate_stop_reason == lldb.eStopReasonException:
+                                try:
+                                    frame = th.GetFrameAtIndex(0) if th.GetNumFrames() > 0 else None
+                                    func_name = frame.GetFunctionName() if frame else "unknown"
+                                    sys.stderr.write(f"[debuger] Hit exception at '{func_name}' immediately after first Continue() - trying to skip it\n")
+                                    sys.stderr.flush()
+                                    # This exception might be during CRT initialization, try to continue
+                                    # Fall through to the wait loop which will handle it
+                                except Exception:
+                                    pass
+
                     # If already exited, we're done
                     if state_after_continue in ("exited", "crashed"):
                         sys.stderr.write(f"[debuger] Process {state_after_continue} immediately after Continue(). Breakpoint was never hit.\n")
+                        sys.stderr.write(f"[debuger] This means the program crashed/exited before reaching main, likely due to:\n")
+                        sys.stderr.write(f"[debuger]   - Unhandled exception during startup/CRT initialization\n")
+                        sys.stderr.write(f"[debuger]   - Crash in global constructors\n")
+                        sys.stderr.write(f"[debuger]   - Assertion failure or abort() call before main\n")
                         sys.stderr.flush()
                         return
                 else:
@@ -602,7 +633,23 @@ class LldbAdapter(BaseAdapter):
                                         func_name = frame.GetFunctionName() if frame else "unknown"
                                         sys.stderr.write(f"[debuger] Exception detected in thread '{th_name}' at '{func_name}' - auto-continuing (#{exception_continue_count}/{max_exception_continues})\n")
                                         sys.stderr.flush()
+
+                                        # Continue past the exception
                                         proc.Continue()
+
+                                        # Check if the process exited after continuing from the exception
+                                        # Since async mode is False, Continue() blocks until the process stops/exits
+                                        state_after_exception_continue = self._state_str()
+                                        sys.stderr.write(f"[debuger] State after exception continue: {state_after_exception_continue}\n")
+                                        sys.stderr.flush()
+
+                                        if state_after_exception_continue in ("exited", "crashed"):
+                                            sys.stderr.write(f"[debuger] Process {state_after_exception_continue} after continuing from exception.\n")
+                                            sys.stderr.write(f"[debuger] The exception was unhandled and caused the program to terminate.\n")
+                                            sys.stderr.write(f"[debuger] You need to fix the exception in your code - the debugger cannot skip fatal exceptions.\n")
+                                            sys.stderr.flush()
+                                            return
+
                                         # Don't break, keep waiting for the real breakpoint
                                         continue
                                     except Exception as e:

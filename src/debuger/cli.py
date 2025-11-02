@@ -663,7 +663,8 @@ def shell(
                 pass
         state.save(project_root)
 
-    console.print("[bold green]Interactive session started[/] - type 'help' for commands. 'quit' to exit.")
+    console.print("[bold green]Interactive session started[/] - type 'help' for commands or press Enter to step.")
+    console.print("[dim]Tip: Press Enter to step (next/step/finish - repeats last stepping command)[/dim]")
     # Start background stdio streamer and show initial context; auto-skip external/CRT frames
     stop_stream = None
     try:
@@ -672,14 +673,20 @@ def shell(
     except Exception:
         pass
     # Simple REPL
+    last_command = "next"  # Default command when user presses Enter
     while True:
         try:
             line = input("debuger> ").strip()
         except (EOFError, KeyboardInterrupt):
             line = "quit"
         if not line:
-            continue
+            # Empty input: repeat last stepping command (or default to "next")
+            line = last_command
         cmd, *rest = line.split()
+
+        # Remember last stepping command for repeat-on-Enter behavior
+        if cmd in ("step", "s", "next", "n", "finish", "stepout"):
+            last_command = cmd
         try:
             if cmd in ("quit", "exit"):  # end session
                 break
@@ -687,6 +694,7 @@ def shell(
                 console.print(
                     "Commands: help, bt, step, next, finish, cont, threads, thread <id>, frames, frame <n>, locals, regs, disasm, eval <expr>, bp add <spec>, bp ls, bp rm <id>, quit"
                 )
+                console.print("[dim]Tip: Press Enter without typing to repeat last step command (defaults to 'next')[/dim]")
             elif cmd == "bt":
                 frames = adapter.backtrace()
                 render_backtrace(frames)
