@@ -109,6 +109,43 @@ class LldbAdapter(BaseAdapter):
             lldb.eStateSuspended: "suspended",
         }.get(state, str(state))
 
+    def _is_system_frame(self, func_name: Optional[str]) -> bool:
+        """Check if a function is in system/WOW64/CRT code that should be skipped."""
+        if not func_name:
+            return False
+
+        func_lower = func_name.lower()
+
+        # WOW64 layer functions (32-bit on 64-bit Windows)
+        wow64_patterns = [
+            "wow64", "wow32", "brcpu", "btcpu",
+            "redirectdospath", "wow64log", "wow64check",
+            "wow64prepare", "wow64shall",
+        ]
+
+        # Windows system/kernel functions
+        system_patterns = [
+            "ntdll!", "kernel32!", "kernelbase!",
+            "rtl", "ldr", "ki", "zw", "nt",
+            "__tmaincrtstartup", "__scrt", "__crt",
+            "basethreadinitthunk", "rtluserthread",
+        ]
+
+        # Exception handling internals
+        exception_patterns = [
+            "raiseexception", "rtlraise", "kiuser",
+            "__c_specific_handler", "__cxx", "_except",
+            "unhandledexception",
+        ]
+
+        all_patterns = wow64_patterns + system_patterns + exception_patterns
+
+        for pattern in all_patterns:
+            if pattern in func_lower:
+                return True
+
+        return False
+
     def launch(self, target: str, args: List[str] | None = None, cwd: Optional[str] = None, env: Optional[dict] = None, stop_at_entry: bool = False) -> None:
         lldb = self._require()
         self._ensure_debugger()
@@ -864,14 +901,67 @@ class LldbAdapter(BaseAdapter):
     def step_in(self) -> None:
         th = self._selected_thread()
         th.StepInto()
+        # Auto-skip WOW64 and system frames
+        self._skip_system_frames()
 
     def step_over(self) -> None:
         th = self._selected_thread()
         th.StepOver()
+        # Auto-skip WOW64 and system frames
+        self._skip_system_frames()
 
     def step_out(self) -> None:
         th = self._selected_thread()
         th.StepOut()
+        # Auto-skip WOW64 and system frames
+        self._skip_system_frames()
+
+    def _skip_system_frames(self, max_attempts: int = 50) -> None:
+        """Automatically step out of WOW64/system frames until we reach user code."""
+        if not self._process or not self._lldb:
+            return
+
+        lldb = self._lldb
+        import sys
+
+        for attempt in range(max_attempts):
+            # Check if process is still valid
+            if self._process.GetState() not in (lldb.eStateStopped, lldb.eStateSuspended):
+                break
+
+            # Get current location
+            try:
+                path, line, func = self.current_location()
+            except Exception:
+                break
+
+            # Check if we're in a system frame
+            if not self._is_system_frame(func):
+                # We're in user code, stop skipping
+                if attempt > 0:
+                    sys.stderr.write(f"[debuger] Skipped {attempt} system frame(s), now at user code: {func or 'unknown'}\n")
+                    sys.stderr.flush()
+                break
+
+            # We're in a system frame, step out
+            if attempt == 0:
+                sys.stderr.write(f"[debuger] In system frame '{func}', auto-stepping out...\n")
+                sys.stderr.flush()
+            elif attempt % 10 == 0:
+                sys.stderr.write(f"[debuger] Still in system frames ({attempt} steps), continuing...\n")
+                sys.stderr.flush()
+
+            try:
+                th = self._selected_thread()
+                th.StepOut()
+            except Exception as e:
+                sys.stderr.write(f"[debuger] Failed to step out of system frame: {e}\n")
+                sys.stderr.flush()
+                break
+        else:
+            # Hit max attempts
+            sys.stderr.write(f"[debuger] WARNING: Still in system frames after {max_attempts} step-outs. Giving up.\n")
+            sys.stderr.flush()
 
     def backtrace(self, max_frames: Optional[int] = None) -> List[str]:
         th = self._selected_thread()
