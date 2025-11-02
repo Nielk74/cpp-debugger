@@ -123,6 +123,21 @@ class LldbAdapter(BaseAdapter):
                 pass
 
         launch_info = lldb.SBLaunchInfo(args or [])
+        # Honor requested stop at entry using LLDB's native flag, and
+        # inherit the terminal so console apps don't see EOF on stdin.
+        try:
+            launch_info.SetStopAtEntry(bool(stop_at_entry))
+        except Exception:
+            # Older LLDB builds may not support this setter; ignore.
+            pass
+        try:
+            flags = launch_info.GetLaunchFlags()
+            inherit_flag = getattr(lldb, "eLaunchFlagInheritTTY", 0)
+            if inherit_flag:
+                launch_info.SetLaunchFlags(flags | inherit_flag)
+        except Exception:
+            # Be resilient if flags API differs across LLDB builds.
+            pass
         launch_info.SetWorkingDirectory(cwd or "")
         if env:
             env_list = [f"{k}={v}" for k, v in env.items()]
