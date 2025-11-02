@@ -239,9 +239,16 @@ class LldbAdapter(BaseAdapter):
         sys.stderr.flush()
 
         launch_info = lldb.SBLaunchInfo(args or [])
-        # Never use LLDB's stop-at-entry; we explicitly breakpoint on main.
+        # Use stop-at-entry to ensure we stop before any code runs
+        # This prevents the process from exiting before hitting our main breakpoint
         try:
-            launch_info.SetStopAtEntry(False)
+            if stop_at_entry:
+                launch_info.SetStopAtEntry(True)
+                import sys
+                sys.stderr.write(f"[debuger] SetStopAtEntry(True) - will stop at entry point\n")
+                sys.stderr.flush()
+            else:
+                launch_info.SetStopAtEntry(False)
         except Exception:
             # Older LLDB builds may not support this setter; ignore.
             pass
@@ -404,8 +411,16 @@ class LldbAdapter(BaseAdapter):
 
             # Check if process is actually stopped
             is_running = proc.GetState() == lldb.eStateRunning
-            sys.stderr.write(f"[debuger] Process is running: {is_running}\n")
+            is_exited = proc.GetState() == lldb.eStateExited
+            sys.stderr.write(f"[debuger] Process is running: {is_running}, is exited: {is_exited}\n")
             sys.stderr.flush()
+
+            # If process exited immediately, get exit status
+            if is_exited:
+                exit_status = proc.GetExitStatus()
+                exit_desc = proc.GetExitDescription()
+                sys.stderr.write(f"[debuger] EXIT STATUS: {exit_status}, description: {exit_desc or 'none'}\n")
+                sys.stderr.flush()
         else:
             sys.stderr.write(f"[debuger] Process launched: PID={pid}, state={state} (process invalid!)\n")
             sys.stderr.flush()
@@ -433,18 +448,30 @@ class LldbAdapter(BaseAdapter):
             sys.stderr.write(f"[debuger] Warning: Could not get stop reason: {e}\n")
             sys.stderr.flush()
 
-        # If stop reason is 'none', the breakpoint wasn't hit yet.
-        # This can happen if the process launched but hasn't reached main yet,
-        # or if the breakpoint failed to be set. Try to continue to the breakpoint.
-        # Also check if the process is actually in a running state (not stopped)
+        # If we used stop_at_entry, we need to continue to the main breakpoint
+        # The process should have stopped at entry point, now continue to main
         process_is_running = proc.GetState() == lldb.eStateRunning if (proc and proc.IsValid()) else False
         process_is_stopped = proc.GetState() == lldb.eStateStopped if (proc and proc.IsValid()) else False
+        process_is_exited = proc.GetState() == lldb.eStateExited if (proc and proc.IsValid()) else False
 
-        if (stop_reason == lldb.eStopReasonNone or process_is_running) and stop_at_entry:
+        # If process already exited, don't try to continue
+        if process_is_exited:
+            sys.stderr.write(f"[debuger] Process exited immediately after launch - never reached main breakpoint\n")
+            sys.stderr.write(f"[debuger] This usually means:\n")
+            sys.stderr.write(f"[debuger]   1. The program crashed or threw an unhandled exception during startup\n")
+            sys.stderr.write(f"[debuger]   2. The program has no main function (or it's named differently)\n")
+            sys.stderr.write(f"[debuger]   3. There's an issue with the runtime initialization (CRT)\n")
+            sys.stderr.flush()
+            return
+
+        # If we stopped at entry or stop reason is none, continue to the main breakpoint
+        if stop_at_entry and (stop_reason == lldb.eStopReasonNone or stop_reason == lldb.eStopReasonTrace or process_is_stopped):
             if process_is_running:
-                sys.stderr.write(f"[debuger] Process is in running state - waiting for it to hit breakpoint or stop...\n")
+                sys.stderr.write(f"[debuger] Process is running - waiting for main breakpoint...\n")
+            elif stop_reason == lldb.eStopReasonTrace:
+                sys.stderr.write(f"[debuger] Stopped at entry point (trace) - continuing to main breakpoint...\n")
             else:
-                sys.stderr.write(f"[debuger] Stop reason is 'none' but process is stopped - attempting to continue to breakpoint...\n")
+                sys.stderr.write(f"[debuger] Stopped with reason '{stop_reason}' - continuing to main breakpoint...\n")
             sys.stderr.flush()
             try:
                 # Only call Continue() if the process is actually stopped
