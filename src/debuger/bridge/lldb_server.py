@@ -90,6 +90,8 @@ def main() -> None:
                     result = True
                 elif method == "current_location":
                     result = adapter.current_location()
+                elif method == "read_stdio":
+                    result = adapter.read_stdio()
                 else:
                     raise AdapterError(f"Unknown method: {method}")
 

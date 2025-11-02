@@ -45,6 +45,7 @@ class BaseAdapter(Protocol):
     def select_frame(self, index: int) -> None: ...
     def select_thread(self, tid: int) -> None: ...
     def current_location(self) -> tuple[Optional[str], Optional[int], Optional[str]]: ...
+    def read_stdio(self) -> tuple[str, str]: ...
 
 
 @dataclass
@@ -167,11 +168,8 @@ def get_adapter(preferred: Optional[str] = None) -> BaseAdapter:
         if _try_enable_lldb_python():
             return LldbAdapter()
         else:
-            # Try embedded-python bridge
-            try:
-                return LldbBridgeAdapter()
-            except Exception:
-                return LldbCliAdapter()
+            # Never use CLI fallback; prefer the embedded-python bridge.
+            return LldbBridgeAdapter()
     if pref == "gdb" and gdb_info.available:
         return GdbMiAdapter()
 
@@ -179,10 +177,8 @@ def get_adapter(preferred: Optional[str] = None) -> BaseAdapter:
         if _try_enable_lldb_python():
             return LldbAdapter()
         else:
-            try:
-                return LldbBridgeAdapter()
-            except Exception:
-                return LldbCliAdapter()
+            # Never use CLI fallback; prefer the embedded-python bridge.
+            return LldbBridgeAdapter()
     if gdb_info.available:
         return GdbMiAdapter()
 

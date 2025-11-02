@@ -14,6 +14,10 @@ class LldbAdapter(BaseAdapter):
         self._debugger = None
         self._target = None
         self._process = None
+        self._stdout_file = None
+        self._stderr_file = None
+        self._stdout_pos = 0
+        self._stderr_pos = 0
 
     # Internal helpers
     def _require(self):
@@ -115,26 +119,62 @@ class LldbAdapter(BaseAdapter):
         if not tgt or not tgt.IsValid():
             raise AdapterError(f"Failed to create LLDB target for {target}")
 
+        # Proactively disable any preconfigured exception breakpoints to avoid
+        # stopping on language/runtime exceptions.
+        try:
+            for i in range(tgt.GetNumBreakpoints()):
+                bp_i = tgt.GetBreakpointAtIndex(i)
+                try:
+                    desc = self._lldb.SBStream() if self._lldb else None
+                    if desc is not None and bp_i.GetDescription(desc):
+                        if "exception" in (desc.GetData() or "").lower():
+                            bp_i.SetEnabled(False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Prefer stopping at 'main' via a breakpoint rather than using
+        # LLDB's stop-at-entry flag. This avoids halting before CRT startup
+        # and ensures we land on the first location in main.
         if stop_at_entry:
-            # Break in main or entry
             br = tgt.BreakpointCreateByName("main")
-            if not br or not br.IsValid():
-                # Not fatal
+            try:
+                if br and br.IsValid():
+                    br.SetOneShot(True)
+            except Exception:
+                pass
+            # Fallback: source-regex breakpoint that matches typical C/C++ mains
+            try:
+                regex = r"^\s*(int|auto|void)\s+main\s*\("
+                fslist = lldb.SBFileSpecList()
+                br2 = tgt.BreakpointCreateBySourceRegex(regex, fslist)
+                if br2 and br2.IsValid():
+                    try:
+                        br2.SetOneShot(True)
+                    except Exception:
+                        pass
+            except Exception:
                 pass
 
         launch_info = lldb.SBLaunchInfo(args or [])
-        # Honor requested stop at entry using LLDB's native flag, and
-        # inherit the terminal so console apps don't see EOF on stdin.
+        # Never use LLDB's stop-at-entry; we explicitly breakpoint on main.
         try:
-            launch_info.SetStopAtEntry(bool(stop_at_entry))
+            launch_info.SetStopAtEntry(False)
         except Exception:
             # Older LLDB builds may not support this setter; ignore.
             pass
         try:
             flags = launch_info.GetLaunchFlags()
             inherit_flag = getattr(lldb, "eLaunchFlagInheritTTY", 0)
-            if inherit_flag:
-                launch_info.SetLaunchFlags(flags | inherit_flag)
+            disable_stdio = getattr(lldb, "eLaunchFlagDisableSTDIO", 0)
+            # Capture STDIO via LLDB so we can relay it through read_stdio.
+            # Ensure STDIO is enabled and do NOT inherit the TTY.
+            if disable_stdio and (flags & disable_stdio):
+                flags &= ~disable_stdio
+            if inherit_flag and (flags & inherit_flag):
+                flags &= ~inherit_flag
+            launch_info.SetLaunchFlags(flags)
         except Exception:
             # Be resilient if flags API differs across LLDB builds.
             pass
@@ -142,6 +182,47 @@ class LldbAdapter(BaseAdapter):
         if env:
             env_list = [f"{k}={v}" for k, v in env.items()]
             launch_info.SetEnvironmentEntries(env_list, True)
+
+        # On some Windows LLDB builds, GetSTDOUT/ERR may not stream reliably.
+        # Redirect inferior stdout/stderr to temp files and tail them from read_stdio.
+        try:
+            import tempfile, os as _os
+            # Create unique temp files per launch
+            fd_out, out_path = tempfile.mkstemp(prefix="debuger_lldb_stdout_", suffix=".log")
+            fd_err, err_path = tempfile.mkstemp(prefix="debuger_lldb_stderr_", suffix=".log")
+            _os.close(fd_out)
+            _os.close(fd_err)
+            self._stdout_file = out_path
+            self._stderr_file = err_path
+            ok_redirect = False
+            try:
+                if hasattr(launch_info, "SetStandardOutputFile"):
+                    launch_info.SetStandardOutputFile(self._stdout_file, True)  # transfer ownership
+                    ok_redirect = True
+                if hasattr(launch_info, "SetStandardErrorFile"):
+                    launch_info.SetStandardErrorFile(self._stderr_file, True)
+                    ok_redirect = True
+            except Exception:
+                ok_redirect = False
+            if not ok_redirect:
+                # Older LLDB builds: try path-based setters
+                try:
+                    if hasattr(launch_info, "SetStandardOutputPath"):
+                        launch_info.SetStandardOutputPath(self._stdout_file)
+                        ok_redirect = True
+                    if hasattr(launch_info, "SetStandardErrorPath"):
+                        launch_info.SetStandardErrorPath(self._stderr_file)
+                        ok_redirect = True
+                except Exception:
+                    pass
+            self._stdout_pos = 0
+            self._stderr_pos = 0
+        except Exception:
+            # Fallback silently if redirection APIs are unavailable
+            self._stdout_file = None
+            self._stderr_file = None
+            self._stdout_pos = 0
+            self._stderr_pos = 0
 
         error = lldb.SBError()
         proc = tgt.Launch(launch_info, error)
@@ -151,6 +232,33 @@ class LldbAdapter(BaseAdapter):
         self._target = tgt
         self._process = proc
         self._session_ready = True
+
+        # If we stopped at an unhelpful location (e.g., function epilogue or brace),
+        # try a few step-ins to land on a meaningful source line inside main.
+        try:
+            th = self._selected_thread()
+            for _ in range(5):
+                path, line, func = self.current_location()
+                if not path or not line:
+                    th.StepInto()
+                    continue
+                try:
+                    # Read the source line and check it's not closing brace / whitespace
+                    import io
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        for i, ln in enumerate(f, start=1):
+                            if i == line:
+                                s = ln.strip()
+                                break
+                        else:
+                            s = ""
+                    if s and s not in ("}", "{"):
+                        break
+                except Exception:
+                    break
+                th.StepInto()
+        except Exception:
+            pass
 
     def attach(self, pid: int) -> None:
         lldb = self._require()
@@ -175,6 +283,17 @@ class LldbAdapter(BaseAdapter):
         finally:
             if self._debugger is not None and self._lldb is not None:
                 self._lldb.SBDebugger.Destroy(self._debugger)
+        # Cleanup temp stdio files
+        try:
+            import os as _os
+            for p in (self._stdout_file, self._stderr_file):
+                try:
+                    if p and _os.path.exists(p):
+                        _os.remove(p)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         self._process = None
         self._target = None
         self._debugger = None
@@ -371,3 +490,48 @@ class LldbAdapter(BaseAdapter):
             path = None
         line = le.GetLine() if le else 0
         return (path, int(line) if line else None, func)
+
+    def read_stdio(self) -> tuple[str, str]:
+        # Prefer tailing files if we redirected output; also drain SBProcess pipes
+        try:
+            out_file_data = ""
+            if self._stdout_file:
+                with open(self._stdout_file, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(self._stdout_pos)
+                    out_file_data = f.read()
+                    self._stdout_pos = f.tell()
+        except Exception:
+            out_file_data = ""
+        try:
+            err_file_data = ""
+            if self._stderr_file:
+                with open(self._stderr_file, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(self._stderr_pos)
+                    err_file_data = f.read()
+                    self._stderr_pos = f.tell()
+        except Exception:
+            err_file_data = ""
+        # Combine with direct LLDB drains to be safe
+        out_pipe_data = ""
+        err_pipe_data = ""
+        try:
+            if self._process:
+                while True:
+                    chunk = self._process.GetSTDOUT(8192)
+                    if not chunk:
+                        break
+                    out_pipe_data += chunk
+        except Exception:
+            pass
+        try:
+            if self._process:
+                while True:
+                    chunk = self._process.GetSTDERR(8192)
+                    if not chunk:
+                        break
+                    err_pipe_data += chunk
+        except Exception:
+            pass
+        out_s = (out_file_data or "") + (out_pipe_data or "")
+        err_s = (err_file_data or "") + (err_pipe_data or "")
+        return (out_s, err_s)

@@ -57,7 +57,15 @@ def source_snippet(path: str, line: int, context: int = 3, language: str = "cpp"
     start = max(1, clamped - context)
     end = min(total, clamped + context)
     code = "".join(lines[start - 1 : end])
-    syn = Syntax(code, language, line_numbers=True, line_numbers_start=start, highlight_lines={clamped}, word_wrap=False)
+    # Rich Syntax uses 'start_line' for the first displayed line index.
+    syn = Syntax(
+        code,
+        language,
+        line_numbers=True,
+        start_line=start,
+        highlight_lines={clamped},
+        word_wrap=False,
+    )
     console.print(Panel(syn, title=f"{path}:{clamped}"))
 
 

@@ -9,6 +9,8 @@ from rich.markup import escape
 from typing import Optional
 
 import typer
+import threading
+import time
 import yaml
 
 from . import __version__
@@ -83,6 +85,68 @@ def _open_location(path: str, line: int, template: Optional[str]) -> None:
 @app.callback()
 def _entry() -> None:
     pass
+
+
+def _drain_stdio(adapter) -> None:
+    try:
+        out, err = adapter.read_stdio()
+    except Exception:
+        return
+    if out:
+        # Print program stdout verbatim; disable markup interpretation
+        console.print(out, end="", markup=False)
+    if err:
+        console.print(err, end="", markup=False)
+
+
+def _start_stdio_stream(adapter):
+    stop = threading.Event()
+
+    def _loop():
+        try:
+            while not stop.is_set():
+                _drain_stdio(adapter)
+                # Small delay to avoid busy loop
+                time.sleep(0.15)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_loop, name="debuger-stdio-stream", daemon=True)
+    t.start()
+    return stop
+
+
+def _show_after_stop(adapter, cfg, state, project_root, action_label: str) -> None:
+    """Display source context after a stop; auto-skip external/CRT frames.
+
+    Tries up to 10 small steps to reach a file that exists locally.
+    Records hits and events when analyze is active.
+    """
+    max_skip = 10
+    for i in range(max_skip + 1):
+        try:
+            loc = adapter.current_location()
+        except Exception:
+            loc = (None, None, None)
+        if loc and loc[0] and loc[1]:
+            spath = remap_source(loc[0], cfg)
+            from pathlib import Path as _P
+            if _P(spath).exists():
+                source_snippet(spath, int(loc[1]))
+                if state.analyze_active:
+                    state.record_hit(spath, int(loc[1]))
+                    state.record_event(spath, int(loc[1]), loc[2], action_label)
+                    state.save(project_root)
+                return
+        # If source not available, attempt to step over and retry
+        try:
+            adapter.step_over()
+            _drain_stdio(adapter)
+        except Exception:
+            break
+    # Fallback: show top frame text if we couldn't find local source
+    for row in adapter.backtrace(1):
+        console.print(row)
 
 
 @app.command()
@@ -327,7 +391,20 @@ def analyze_report(
         info(f"project_root={project_root}")
         info(f"state_path={state_path}")
         info(f"trace_files={len(st.trace)}")
+    # Show the comparison window used (informational)
+    window = (
+        f"since={since}" if since else (
+            f"days={days}" if days else (
+                f"commits={commits}" if commits else "commits=50"
+            )
+        )
+    )
+    info(f"Window: {window}")
     entries = generate_report(project_root, cfg, st, since=since, days=days, commits=commits)
+    if not entries:
+        warn("No runtime trace recorded; showing recent Git changes instead.")
+        from .analysis import generate_git_only_report
+        entries = generate_git_only_report(project_root, since=since, days=days, commits=commits, per_file=3)
     if top is not None:
         entries = entries[:top]
     if not entries:
@@ -341,20 +418,83 @@ def analyze_report(
         for e in entries:
             groups[e.path].append(e)
         for path, els in groups.items():
-            info(f"File: {path} ({sum(x.hits for x in els)} hits)")
+            total_hits = sum(x.hits for x in els)
+            info(f"File: {path} ({total_hits} hits)")
             shown = 0
             for e in els:
                 if shown >= previews:
                     break
                 source_snippet(path, e.line)
                 shown += 1
+                # Git metadata for this exact line
+                try:
+                    meta = []
+                    if getattr(e, "commit", None):
+                        meta.append(("Commit", str(e.commit)[:12]))
+                    if getattr(e, "author", None):
+                        meta.append(("Author", str(e.author)))
+                    if getattr(e, "author_time", None):
+                        meta.append(("Date", str(e.author_time)))
+                    if getattr(e, "summary", None):
+                        meta.append(("Summary", str(e.summary)))
+                    if meta:
+                        kv_table("Git", meta)
+                except Exception:
+                    pass
+            # Show recent capture events for this file (up to 5)
+            try:
+                recent = [ev for ev in state.trace_events if ev.get("path") == path]
+                recent = recent[-5:]
+                if recent:
+                    from rich.table import Table
+                    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+                    table.add_column("When", style="cyan", width=8)
+                    table.add_column("Action", style="magenta", width=8)
+                    table.add_column("Func", style="bold")
+                    table.add_column("Line", style="green", width=6)
+                    for ev in recent:
+                        table.add_row(str(ev.get("ts", ""))[-8:], str(ev.get("action", "")), str(ev.get("func", "")), str(ev.get("line", "")))
+                    console.print(table)
+                # Summary by action type
+                if recent or els:
+                    from collections import Counter
+                    evs = [ev for ev in state.trace_events if ev.get("path") == path]
+                    counts = Counter(ev.get("action", "") for ev in evs)
+                    first_ts = evs[0].get("ts", "") if evs else ""
+                    last_ts = evs[-1].get("ts", "") if evs else ""
+                    from .render import kv_table
+                    rows = [
+                        ("Total hits", str(total_hits)),
+                        ("Events", ", ".join(f"{k}:{v}" for k, v in counts.items()) or "-"),
+                        ("First", first_ts or "-"),
+                        ("Last", last_ts or "-"),
+                    ]
+                    kv_table("Summary", rows)
+                # Top lines by hits (quick glance)
+                try:
+                    lm = state.trace.get(path, {})
+                    if lm:
+                        items = sorted(((int(k), int(v)) for k, v in lm.items()), key=lambda t: (-t[1], t[0]))[:5]
+                        from rich.table import Table as _T
+                        t2 = _T(show_header=True, header_style="bold", box=None, pad_edge=False)
+                        t2.add_column("Line", style="green", width=6)
+                        t2.add_column("Hits", style="yellow", width=6, justify="right")
+                        for ln, hv in items:
+                            t2.add_row(str(ln), str(hv))
+                        console.print(t2)
+                except Exception:
+                    pass
+            except Exception:
+                pass
     else:
         from rich.table import Table
         table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
         table.add_column("Hits", justify="right", style="yellow", width=6)
         table.add_column("Location", style="green")
+        table.add_column("Author", style="cyan")
+        table.add_column("Date", style="magenta")
         for e in entries:
-            table.add_row(str(e.hits), f"{e.path}:{e.line}")
+            table.add_row(str(e.hits), f"{e.path}:{e.line}", str(getattr(e, "author", "") or ""), str(getattr(e, "author_time", "") or ""))
         console.print(table)
 
 
@@ -380,7 +520,7 @@ app.add_typer(analyze_app, name="analyze")
 def shell(
     path: Optional[str] = typer.Argument(None, help="Path to executable. If omitted, uses debuger.yaml"),
     debugger: Optional[str] = typer.Option(None, help="Preferred adapter: lldb|gdb|cdb"),
-    stop_at_entry: bool = typer.Option(True, help="Break at program entry ('main')"),
+    stop_at_entry: bool = typer.Option(True, help="Break at main via breakpoint (no stop-at-entry)"),
 ) -> None:
     """Start an interactive debugger session (experimental)."""
     # Resolve target/config
@@ -474,12 +614,11 @@ def shell(
         state.save(project_root)
 
     console.print("[bold green]Interactive session started[/] - type 'help' for commands. 'quit' to exit.")
-    # Show initial context if available
+    # Start background stdio streamer and show initial context; auto-skip external/CRT frames
+    stop_stream = None
     try:
-        loc = adapter.current_location()
-        if loc and loc[0] and loc[1]:
-            spath = remap_source(loc[0], cfg)
-            source_snippet(spath, int(loc[1]))
+        stop_stream = _start_stdio_stream(adapter)
+        _show_after_stop(adapter, cfg, state, project_root, "launch")
     except Exception:
         pass
     # Simple REPL
@@ -509,55 +648,32 @@ def shell(
                         source_snippet(spath, int(loc[1]))
                 except Exception:
                     pass
-            elif cmd == "step":
+            elif cmd in ("step", "s"):
                 adapter.step_in()
-                loc = adapter.current_location()
-                if loc and loc[0] and loc[1]:
-                    spath = remap_source(loc[0], cfg)
-                    source_snippet(spath, int(loc[1]))
-                    if state.analyze_active:
-                        state.record_hit(spath, int(loc[1]))
-                        state.save(project_root)
-                else:
-                    for row in adapter.backtrace(1):
-                        console.print(row)
-            elif cmd == "next":
+                _drain_stdio(adapter)
+                _show_after_stop(adapter, cfg, state, project_root, "step")
+            elif cmd in ("next", "n"):
                 adapter.step_over()
-                loc = adapter.current_location()
-                if loc and loc[0] and loc[1]:
-                    spath = remap_source(loc[0], cfg)
-                    source_snippet(spath, int(loc[1]))
-                    if state.analyze_active:
-                        state.record_hit(spath, int(loc[1]))
-                        state.save(project_root)
-                else:
-                    for row in adapter.backtrace(1):
-                        console.print(row)
+                _drain_stdio(adapter)
+                _show_after_stop(adapter, cfg, state, project_root, "next")
             elif cmd in ("finish", "stepout"):
                 adapter.step_out()
+                _drain_stdio(adapter)
                 loc = adapter.current_location()
                 if loc and loc[0] and loc[1]:
                     spath = remap_source(loc[0], cfg)
                     source_snippet(spath, int(loc[1]))
                     if state.analyze_active:
                         state.record_hit(spath, int(loc[1]))
+                        state.record_event(spath, int(loc[1]), loc[2], "finish")
                         state.save(project_root)
                 else:
                     for row in adapter.backtrace(1):
                         console.print(row)
-            elif cmd in ("cont", "continue"):
+            elif cmd in ("cont", "continue", "c"):
                 adapter.continue_run()
-                # after continue, show top frame if stopped again
-                loc = adapter.current_location()
-                if loc and loc[0] and loc[1]:
-                    spath = remap_source(loc[0], cfg)
-                    source_snippet(spath, int(loc[1]))
-                    if state.analyze_active:
-                        state.record_hit(spath, int(loc[1]))
-                        state.save(project_root)
-                else:
-                    for row in adapter.backtrace(1):
-                        console.print(row)
+                _drain_stdio(adapter)
+                _show_after_stop(adapter, cfg, state, project_root, "continue")
             elif cmd in ("ctx", "context"):
                 try:
                     loc = adapter.current_location()
@@ -812,7 +928,12 @@ def shell(
             continue
 
     try:
-        # Attempt to shut down adapter
+        # Attempt to stop stdio stream and shut down adapter
+        try:
+            if 'stop_stream' in locals() and stop_stream is not None:
+                stop_stream.set()
+        except Exception:
+            pass
         adapter.shutdown()
     except Exception:
         pass

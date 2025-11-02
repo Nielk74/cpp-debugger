@@ -29,7 +29,8 @@ class LldbCliAdapter(BaseAdapter):
         exe = self._which_lldb()
         cmd: List[str] = [exe]
         if stop_at_entry:
-            cmd += ["-o", "breakpoint set -n main"]
+            # Set a one-shot breakpoint on main instead of using stop-at-entry.
+            cmd += ["-o", "breakpoint set --name main --one-shot true"]
         # Run program immediately under lldb; user interacts directly
         if args:
             cmd += [target, "--", *args]
@@ -79,3 +80,5 @@ class LldbCliAdapter(BaseAdapter):
     def bp_remove(self, bp_id: int) -> None:
         raise AdapterError("Not available in lldb CLI passthrough mode")
 
+    def read_stdio(self) -> tuple[str, str]:
+        return "", ""

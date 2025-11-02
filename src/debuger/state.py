@@ -22,6 +22,7 @@ class SessionState:
     analyze_active: bool = False
     analyze_window: dict = field(default_factory=dict)  # {since|days|commits}
     trace: dict = field(default_factory=dict)  # { path: { line: count } }
+    trace_events: List[dict] = field(default_factory=list)  # [{path,line,func,action,ts}]
 
     @classmethod
     def load(cls, root: Path) -> "SessionState":
@@ -36,6 +37,7 @@ class SessionState:
             st.analyze_active = bool(data.get("analyze_active", False))
             st.analyze_window = dict(data.get("analyze_window", {}))
             st.trace = dict(data.get("trace", {}))
+            st.trace_events = list(data.get("trace_events", []))
             return st
         except Exception:
             return cls()
@@ -49,6 +51,7 @@ class SessionState:
             "analyze_active": self.analyze_active,
             "analyze_window": dict(self.analyze_window),
             "trace": self.trace,
+            "trace_events": self.trace_events,
         }
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -85,6 +88,37 @@ class SessionState:
             pass
         file_map = self.trace.setdefault(path, {})
         file_map[str(line)] = int(file_map.get(str(line), 0)) + 1
+
+    def record_event(self, path: str, line: int, func: Optional[str], action: str) -> None:
+        try:
+            from datetime import datetime
+            ts = datetime.now().isoformat(timespec="seconds")
+        except Exception:
+            ts = ""
+        # Clamp line similarly to record_hit
+        if not path or not isinstance(line, int) or line <= 0:
+            return
+        try:
+            p = Path(path)
+            if p.exists():
+                try:
+                    total = sum(1 for _ in p.open("r", encoding="utf-8", errors="replace"))
+                    if total > 0:
+                        if line < 1:
+                            line = 1
+                        elif line > total:
+                            line = total
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self.trace_events.append({
+            "path": path,
+            "line": int(line),
+            "func": func or "",
+            "action": action,
+            "ts": ts,
+        })
 
     def clear_trace(self) -> None:
         self.trace = {}

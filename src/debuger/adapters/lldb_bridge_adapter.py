@@ -280,3 +280,13 @@ class LldbBridgeAdapter(BaseAdapter):
         if isinstance(res, dict):
             return (res.get("path"), res.get("line"), res.get("func"))  # type: ignore[return-value]
         return (None, None, None)
+
+    def read_stdio(self) -> tuple[str, str]:
+        res = self._rpc("read_stdio")
+        if isinstance(res, (list, tuple)):
+            out = res[0] if len(res) > 0 else ""
+            err = res[1] if len(res) > 1 else ""
+            return (str(out or ""), str(err or ""))
+        if isinstance(res, dict):
+            return (str(res.get("0") or res.get("out") or ""), str(res.get("1") or res.get("err") or ""))
+        return ("", "")

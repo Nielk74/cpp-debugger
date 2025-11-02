@@ -1,8 +1,10 @@
 README.md
 pyproject.toml
 src/debuger/__init__.py
+src/debuger/analysis.py
 src/debuger/cli.py
 src/debuger/config.py
+src/debuger/paths.py
 src/debuger/render.py
 src/debuger/session.py
 src/debuger/state.py
@@ -13,6 +15,10 @@ src/debuger.egg-info/entry_points.txt
 src/debuger.egg-info/requires.txt
 src/debuger.egg-info/top_level.txt
 src/debuger/adapters/__init__.py
+src/debuger/adapters/cdb_cli_adapter.py
+src/debuger/adapters/cdb_dbgeng_adapter.py
 src/debuger/adapters/gdb_mi_adapter.py
 src/debuger/adapters/lldb_adapter.py
+src/debuger/adapters/lldb_bridge_adapter.py
 src/debuger/adapters/lldb_cli_adapter.py
+src/debuger/bridge/lldb_server.py
