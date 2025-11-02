@@ -216,6 +216,28 @@ class LldbAdapter(BaseAdapter):
                     sys.stderr.write(f"[debuger] Warning: Exception setting regex breakpoint: {e}\n")
                     sys.stderr.flush()
 
+        # Log all breakpoints before launch to verify they're set
+        import sys
+        sys.stderr.write(f"[debuger] Breakpoints before launch: {tgt.GetNumBreakpoints()}\n")
+        for i in range(tgt.GetNumBreakpoints()):
+            bp = tgt.GetBreakpointAtIndex(i)
+            if bp and bp.IsValid():
+                num_locs = bp.GetNumLocations()
+                enabled = bp.IsEnabled()
+                sys.stderr.write(f"[debuger]   BP #{bp.GetID()}: {num_locs} locations, enabled={enabled}\n")
+                for j in range(min(num_locs, 3)):  # Log first 3 locations
+                    loc = bp.GetLocationAtIndex(j)
+                    if loc and loc.IsValid():
+                        addr = loc.GetAddress()
+                        if addr and addr.IsValid():
+                            line_entry = addr.GetLineEntry()
+                            if line_entry and line_entry.IsValid():
+                                file_spec = line_entry.GetFileSpec()
+                                fname = file_spec.GetFilename() if file_spec else "unknown"
+                                line_num = line_entry.GetLine()
+                                sys.stderr.write(f"[debuger]     Location {j}: {fname}:{line_num}\n")
+        sys.stderr.flush()
+
         launch_info = lldb.SBLaunchInfo(args or [])
         # Never use LLDB's stop-at-entry; we explicitly breakpoint on main.
         try:
@@ -353,8 +375,40 @@ class LldbAdapter(BaseAdapter):
         pid = proc.GetProcessID() if proc else 0
         state = self._state_str()
         import sys
-        sys.stderr.write(f"[debuger] Process launched: PID={pid}, state={state}\n")
+
+        # Check async mode
+        async_mode = dbg.GetAsync() if dbg else None
+        sys.stderr.write(f"[debuger] LLDB async mode: {async_mode}\n")
         sys.stderr.flush()
+
+        # Log detailed process state
+        if proc and proc.IsValid():
+            lldb_state = proc.GetState()
+            lldb_state_names = {
+                lldb.eStateInvalid: "invalid",
+                lldb.eStateUnloaded: "unloaded",
+                lldb.eStateConnected: "connected",
+                lldb.eStateAttaching: "attaching",
+                lldb.eStateLaunching: "launching",
+                lldb.eStateStopped: "stopped",
+                lldb.eStateRunning: "running",
+                lldb.eStateStepping: "stepping",
+                lldb.eStateCrashed: "crashed",
+                lldb.eStateDetached: "detached",
+                lldb.eStateExited: "exited",
+                lldb.eStateSuspended: "suspended",
+            }
+            state_name = lldb_state_names.get(lldb_state, f"unknown({lldb_state})")
+            sys.stderr.write(f"[debuger] Process launched: PID={pid}, state={state_name}\n")
+            sys.stderr.flush()
+
+            # Check if process is actually stopped
+            is_running = proc.GetState() == lldb.eStateRunning
+            sys.stderr.write(f"[debuger] Process is running: {is_running}\n")
+            sys.stderr.flush()
+        else:
+            sys.stderr.write(f"[debuger] Process launched: PID={pid}, state={state} (process invalid!)\n")
+            sys.stderr.flush()
 
         # Log stop reason to verify we actually hit the breakpoint
         stop_reason = lldb.eStopReasonNone
@@ -382,14 +436,42 @@ class LldbAdapter(BaseAdapter):
         # If stop reason is 'none', the breakpoint wasn't hit yet.
         # This can happen if the process launched but hasn't reached main yet,
         # or if the breakpoint failed to be set. Try to continue to the breakpoint.
-        if stop_reason == lldb.eStopReasonNone and stop_at_entry:
-            sys.stderr.write(f"[debuger] Stop reason is 'none' - breakpoint not hit yet. Attempting to continue to breakpoint...\n")
+        # Also check if the process is actually in a running state (not stopped)
+        process_is_running = proc.GetState() == lldb.eStateRunning if (proc and proc.IsValid()) else False
+        process_is_stopped = proc.GetState() == lldb.eStateStopped if (proc and proc.IsValid()) else False
+
+        if (stop_reason == lldb.eStopReasonNone or process_is_running) and stop_at_entry:
+            if process_is_running:
+                sys.stderr.write(f"[debuger] Process is in running state - waiting for it to hit breakpoint or stop...\n")
+            else:
+                sys.stderr.write(f"[debuger] Stop reason is 'none' but process is stopped - attempting to continue to breakpoint...\n")
             sys.stderr.flush()
             try:
-                # Continue execution to hit the breakpoint
-                proc.Continue()
+                # Only call Continue() if the process is actually stopped
+                # If it's already running, we just need to wait for it
+                if process_is_stopped:
+                    sys.stderr.write(f"[debuger] Calling Continue() to run to breakpoint...\n")
+                    sys.stderr.flush()
+
+                    # Call Continue() - this should block until process stops (async mode is False)
+                    proc.Continue()
+
+                    # Check state immediately after Continue() returns
+                    state_after_continue = self._state_str()
+                    sys.stderr.write(f"[debuger] State immediately after Continue(): {state_after_continue}\n")
+                    sys.stderr.flush()
+
+                    # If already exited, we're done
+                    if state_after_continue in ("exited", "crashed"):
+                        sys.stderr.write(f"[debuger] Process {state_after_continue} immediately after Continue(). Breakpoint was never hit.\n")
+                        sys.stderr.flush()
+                        return
+                else:
+                    sys.stderr.write(f"[debuger] Process already running, waiting for stop...\n")
+                    sys.stderr.flush()
 
                 # Wait a moment for the breakpoint to be hit (with timeout)
+                # Note: If async mode is False, Continue() is synchronous and we should already be stopped here
                 import time
                 max_wait = 5.0  # 5 seconds max
                 wait_interval = 0.1
