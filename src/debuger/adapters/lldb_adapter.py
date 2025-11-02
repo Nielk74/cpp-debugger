@@ -67,6 +67,28 @@ class LldbAdapter(BaseAdapter):
             lldb = self._require()
             dbg = lldb.SBDebugger.Create()
             dbg.SetAsync(False)
+            # Redirect LLDB output away from stdout so the bridge JSON channel stays clean
+            try:
+                import sys as _sys, os as _os  # local import to avoid top-level deps
+                # Prefer stderr; use binary buffer if available
+                _fh = getattr(_sys.stderr, "buffer", _sys.stderr)
+                try:
+                    dbg.SetOutputFileHandle(_fh, False)  # type: ignore[attr-defined]
+                    dbg.SetErrorFileHandle(_fh, False)   # type: ignore[attr-defined]
+                except Exception:
+                    # Fallback: silence to devnull if handle APIs differ on this LLDB build
+                    try:
+                        _dev = open(_os.devnull, "wb")
+                        try:
+                            dbg.SetOutputFileHandle(_dev, True)  # transfer ownership
+                            dbg.SetErrorFileHandle(_dev, True)
+                        except Exception:
+                            # Last resort: ignore
+                            pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             self._lldb = lldb
             self._debugger = dbg
 

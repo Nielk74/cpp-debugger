@@ -128,7 +128,7 @@ class LldbBridgeAdapter(BaseAdapter):
         if not lldb_p:
             raise AdapterError("Could not determine LLDB Python path (lldb -P or relative lib)")
         env = os.environ.copy()
-        env["PYTHONPATH"] = lldb_p + ";" + env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = lldb_p + os.pathsep + env.get("PYTHONPATH", "")
 
         # Ensure loader finds python3X.dll used by _lldb.pyd by adding likely
         # directories near lldb.exe to PATH (no-op if absent).
@@ -160,6 +160,19 @@ class LldbBridgeAdapter(BaseAdapter):
                 text=True,
                 env=env,
             )
+            # Drain stderr to avoid child blocking and forward diagnostics
+            if self._proc.stderr is not None:
+                def _drain_err(pipe):
+                    try:
+                        for ln in pipe:
+                            try:
+                                sys.stderr.write(ln)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                t = threading.Thread(target=_drain_err, args=(self._proc.stderr,), daemon=True)
+                t.start()
         except Exception as e:
             raise AdapterError(f"Failed to start LLDB bridge: {e}")
 
@@ -172,17 +185,23 @@ class LldbBridgeAdapter(BaseAdapter):
             msg = json.dumps({"id": rid, "method": method, "params": params or {}})
             self._proc.stdin.write(msg + "\n")
             self._proc.stdin.flush()
-            # Read one response line
-            line = self._proc.stdout.readline()
-            if not line:
-                raise AdapterError("bridge closed pipe")
-            resp = json.loads(line)
-            if resp.get("id") != rid:
-                raise AdapterError("out-of-sync response from bridge")
-            if "error" in resp and resp["error"]:
-                err = resp["error"]
-                raise AdapterError(err.get("message") or "bridge error")
-            return resp.get("result")
+            # Read lines until we get a valid JSON response with matching id
+            while True:
+                line = self._proc.stdout.readline()
+                if not line:
+                    raise AdapterError("bridge closed pipe")
+                try:
+                    resp = json.loads(line)
+                except Exception:
+                    # Skip non-JSON noise on stdout
+                    continue
+                if resp.get("id") != rid:
+                    # Skip out-of-band messages
+                    continue
+                if "error" in resp and resp["error"]:
+                    err = resp["error"]
+                    raise AdapterError(err.get("message") or "bridge error")
+                return resp.get("result")
 
     # BaseAdapter methods delegating to bridge
     def launch(self, target: str, args: List[str] | None = None, cwd: Optional[str] = None, env: Optional[dict] = None, stop_at_entry: bool = False) -> None:
