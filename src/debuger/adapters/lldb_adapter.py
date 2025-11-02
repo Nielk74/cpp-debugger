@@ -287,10 +287,39 @@ class LldbAdapter(BaseAdapter):
         except Exception:
             # Be resilient if flags API differs across LLDB builds.
             pass
-        launch_info.SetWorkingDirectory(cwd or "")
-        if env:
-            env_list = [f"{k}={v}" for k, v in env.items()]
-            launch_info.SetEnvironmentEntries(env_list, True)
+        # Set and log working directory
+        working_dir = cwd or ""
+        if not working_dir:
+            # Default to the directory containing the executable
+            import os
+            working_dir = os.path.dirname(os.path.abspath(target))
+        launch_info.SetWorkingDirectory(working_dir)
+
+        import sys
+        sys.stderr.write(f"[debuger] Target executable: {target}\n")
+        sys.stderr.write(f"[debuger] Working directory: {working_dir}\n")
+        sys.stderr.flush()
+
+        # Automatically add the executable's directory to PATH to help find DLLs
+        import os
+        exe_dir = os.path.dirname(os.path.abspath(target))
+
+        if env is None:
+            env = os.environ.copy()
+
+        # Prepend executable directory to PATH
+        current_path = env.get('PATH', os.environ.get('PATH', ''))
+        if exe_dir not in current_path:
+            env['PATH'] = exe_dir + os.pathsep + current_path
+            sys.stderr.write(f"[debuger] Added executable directory to PATH: {exe_dir}\n")
+            sys.stderr.flush()
+
+        env_list = [f"{k}={v}" for k, v in env.items()]
+        launch_info.SetEnvironmentEntries(env_list, True)
+
+        # Log PATH
+        sys.stderr.write(f"[debuger] PATH (first 300 chars): {env.get('PATH', '')[:300]}...\n")
+        sys.stderr.flush()
 
         # On some Windows LLDB builds, GetSTDOUT/ERR may not stream reliably.
         # Redirect inferior stdout/stderr to temp files and tail them from read_stdio.
@@ -419,7 +448,35 @@ class LldbAdapter(BaseAdapter):
             if is_exited:
                 exit_status = proc.GetExitStatus()
                 exit_desc = proc.GetExitDescription()
-                sys.stderr.write(f"[debuger] EXIT STATUS: {exit_status}, description: {exit_desc or 'none'}\n")
+
+                # Interpret common Windows exit codes
+                exit_code_hex = exit_status & 0xFFFFFFFF  # Convert to unsigned 32-bit
+                exit_meanings = {
+                    0xC0000005: "STATUS_ACCESS_VIOLATION - Program crashed (access violation/segfault)",
+                    0xC0000135: "STATUS_DLL_NOT_FOUND - Missing required DLL! Check dependencies.",
+                    0xC0000409: "STATUS_STACK_BUFFER_OVERRUN - Stack corruption detected",
+                    0xC000001D: "STATUS_ILLEGAL_INSTRUCTION - Invalid CPU instruction",
+                    0xC0000374: "STATUS_HEAP_CORRUPTION - Heap corruption detected",
+                    0xC000041D: "STATUS_FATAL_USER_CALLBACK_EXCEPTION - Unhandled exception",
+                }
+
+                meaning = exit_meanings.get(exit_code_hex, "")
+                sys.stderr.write(f"[debuger] EXIT STATUS: {exit_status} (0x{exit_code_hex:X})\n")
+                if meaning:
+                    sys.stderr.write(f"[debuger] EXIT MEANING: {meaning}\n")
+                if exit_desc:
+                    sys.stderr.write(f"[debuger] EXIT DESCRIPTION: {exit_desc}\n")
+
+                # Special handling for DLL not found
+                if exit_code_hex == 0xC0000135:
+                    sys.stderr.write(f"[debuger] \n")
+                    sys.stderr.write(f"[debuger] SOLUTION: Missing DLL dependencies. Try:\n")
+                    sys.stderr.write(f"[debuger]   1. Ensure all required DLLs are in the same directory as the executable\n")
+                    sys.stderr.write(f"[debuger]   2. Add the directory containing DLLs to your PATH\n")
+                    sys.stderr.write(f"[debuger]   3. Set the working directory to the executable's directory\n")
+                    sys.stderr.write(f"[debuger]   4. Use 'dumpbin /dependents your.exe' to list required DLLs\n")
+                    sys.stderr.write(f"[debuger]   5. Check if Debug/Release DLLs match your build configuration\n")
+
                 sys.stderr.flush()
         else:
             sys.stderr.write(f"[debuger] Process launched: PID={pid}, state={state} (process invalid!)\n")
