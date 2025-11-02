@@ -139,23 +139,32 @@ class LldbAdapter(BaseAdapter):
         # and ensures we land on the first location in main.
         if stop_at_entry:
             br = tgt.BreakpointCreateByName("main")
+            bp_set = False
             try:
                 if br and br.IsValid():
                     br.SetOneShot(True)
-            except Exception:
-                pass
+                    bp_set = True
+                    print(f"[debuger] Breakpoint set on 'main' (ID: {br.GetID()})", flush=True)
+                else:
+                    print(f"[debuger] Warning: Failed to set breakpoint on 'main', trying regex fallback", flush=True)
+            except Exception as e:
+                print(f"[debuger] Warning: Exception setting breakpoint on 'main': {e}", flush=True)
             # Fallback: source-regex breakpoint that matches typical C/C++ mains
-            try:
-                regex = r"^\s*(int|auto|void)\s+main\s*\("
-                fslist = lldb.SBFileSpecList()
-                br2 = tgt.BreakpointCreateBySourceRegex(regex, fslist)
-                if br2 and br2.IsValid():
-                    try:
-                        br2.SetOneShot(True)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            if not bp_set:
+                try:
+                    regex = r"^\s*(int|auto|void)\s+main\s*\("
+                    fslist = lldb.SBFileSpecList()
+                    br2 = tgt.BreakpointCreateBySourceRegex(regex, fslist)
+                    if br2 and br2.IsValid():
+                        try:
+                            br2.SetOneShot(True)
+                            print(f"[debuger] Regex breakpoint set on main pattern (ID: {br2.GetID()})", flush=True)
+                        except Exception:
+                            pass
+                    else:
+                        print(f"[debuger] Warning: Regex breakpoint on main pattern also failed", flush=True)
+                except Exception as e:
+                    print(f"[debuger] Warning: Exception setting regex breakpoint: {e}", flush=True)
 
         launch_info = lldb.SBLaunchInfo(args or [])
         # Never use LLDB's stop-at-entry; we explicitly breakpoint on main.
@@ -191,6 +200,7 @@ class LldbAdapter(BaseAdapter):
 
         # On some Windows LLDB builds, GetSTDOUT/ERR may not stream reliably.
         # Redirect inferior stdout/stderr to temp files and tail them from read_stdio.
+        stdio_redirect_method = None
         try:
             import tempfile, os as _os
             # Create unique temp files per launch
@@ -212,6 +222,8 @@ class LldbAdapter(BaseAdapter):
                 if hasattr(launch_info, "SetStandardErrorFile"):
                     launch_info.SetStandardErrorFile(self._stderr_file, False)
                     ok_redirect = True
+                if ok_redirect:
+                    stdio_redirect_method = "SetStandardOutputFile/SetStandardErrorFile"
             except Exception:
                 ok_redirect = False
 
@@ -224,6 +236,8 @@ class LldbAdapter(BaseAdapter):
                     if hasattr(launch_info, "SetStandardErrorPath"):
                         launch_info.SetStandardErrorPath(self._stderr_file)
                         ok_redirect = True
+                    if ok_redirect:
+                        stdio_redirect_method = "SetStandardOutputPath/SetStandardErrorPath"
                 except Exception:
                     pass
 
@@ -236,13 +250,20 @@ class LldbAdapter(BaseAdapter):
                         launch_info.AddOpenFileAction(1, self._stdout_file, False, True)
                         launch_info.AddOpenFileAction(2, self._stderr_file, False, True)
                         ok_redirect = True
+                        stdio_redirect_method = "AddOpenFileAction"
                 except Exception:
                     pass
 
+            if ok_redirect:
+                print(f"[debuger] Stdio redirect: {stdio_redirect_method} -> {self._stdout_file}, {self._stderr_file}", flush=True)
+            else:
+                print(f"[debuger] Warning: All stdio redirection methods failed, output may not be captured", flush=True)
+
             self._stdout_pos = 0
             self._stderr_pos = 0
-        except Exception:
+        except Exception as e:
             # Fallback silently if redirection APIs are unavailable
+            print(f"[debuger] Warning: Stdio redirection setup failed: {e}", flush=True)
             self._stdout_file = None
             self._stderr_file = None
             self._stdout_pos = 0
@@ -257,32 +278,48 @@ class LldbAdapter(BaseAdapter):
         self._process = proc
         self._session_ready = True
 
+        # Log process state immediately after launch
+        pid = proc.GetProcessID() if proc else 0
+        state = self._state_str()
+        print(f"[debuger] Process launched: PID={pid}, state={state}", flush=True)
+
         # If we stopped at an unhelpful location (e.g., function epilogue or brace),
         # try a few step-ins to land on a meaningful source line inside main.
         try:
             th = self._selected_thread()
-            for _ in range(5):
+            for i in range(5):
+                # Check if process has exited
+                current_state = self._state_str()
+                if current_state in ("exited", "crashed"):
+                    print(f"[debuger] Process {current_state} during stepping, stopping early", flush=True)
+                    break
+
                 path, line, func = self.current_location()
                 if not path or not line:
+                    print(f"[debuger] Step {i+1}/5: No source location, stepping into", flush=True)
                     th.StepInto()
                     continue
                 try:
                     # Read the source line and check it's not closing brace / whitespace
                     import io
                     with open(path, "r", encoding="utf-8", errors="replace") as f:
-                        for i, ln in enumerate(f, start=1):
-                            if i == line:
+                        for j, ln in enumerate(f, start=1):
+                            if j == line:
                                 s = ln.strip()
                                 break
                         else:
                             s = ""
                     if s and s not in ("}", "{"):
+                        print(f"[debuger] Stepped to meaningful line: {path}:{line} in {func}", flush=True)
                         break
-                except Exception:
+                    else:
+                        print(f"[debuger] Step {i+1}/5: At {path}:{line} (brace/empty), stepping into", flush=True)
+                except Exception as e:
+                    print(f"[debuger] Step {i+1}/5: Exception reading source: {e}", flush=True)
                     break
                 th.StepInto()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[debuger] Warning: Post-launch stepping failed: {e}", flush=True)
 
     def attach(self, pid: int) -> None:
         lldb = self._require()
@@ -517,6 +554,18 @@ class LldbAdapter(BaseAdapter):
 
     def read_stdio(self) -> tuple[str, str]:
         # Prefer tailing files if we redirected output; also drain SBProcess pipes
+        # First, ensure any buffered data is flushed to disk
+        try:
+            if self._process:
+                # Force flush of process stdio buffers by polling the process
+                import os as _os
+                if self._stdout_file and _os.path.exists(self._stdout_file):
+                    # Wait a tiny bit for OS to flush buffers
+                    import time
+                    time.sleep(0.01)
+        except Exception:
+            pass
+
         try:
             out_file_data = ""
             if self._stdout_file:

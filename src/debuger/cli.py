@@ -603,6 +603,34 @@ def shell(
         error(str(e))
         raise typer.Exit(code=4)
 
+    # Check if process is still alive immediately after launch
+    try:
+        if hasattr(adapter, '_process') and adapter._process:
+            import time
+            time.sleep(0.05)  # Brief pause to let process initialize
+            state_str = adapter._state_str() if hasattr(adapter, '_state_str') else "unknown"
+            if state_str == "exited":
+                console.print("[yellow]Warning: Program exited immediately after launch[/]")
+            elif state_str == "crashed":
+                console.print("[red]Error: Program crashed immediately after launch[/]")
+    except Exception:
+        pass
+
+    # Drain any early output from the program before showing the prompt
+    try:
+        # Give the process a moment to produce output
+        import time
+        time.sleep(0.1)
+        out, err = adapter.read_stdio()
+        if out:
+            console.print("[bold cyan]Program output:[/]")
+            console.print(out, end="", markup=False)
+        if err:
+            console.print("[bold red]Program stderr:[/]")
+            console.print(err, end="", markup=False)
+    except Exception:
+        pass
+
     # Reapply saved breakpoints
     if state.breakpoints:
         for bp in state.breakpoints:
