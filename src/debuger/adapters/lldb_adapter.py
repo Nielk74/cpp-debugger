@@ -303,6 +303,28 @@ class LldbAdapter(BaseAdapter):
         sys.stderr.write(f"[debuger] Process launched: PID={pid}, state={state}\n")
         sys.stderr.flush()
 
+        # Log stop reason to verify we actually hit the breakpoint
+        try:
+            if proc and proc.IsValid():
+                th = proc.selected_thread
+                if th and th.IsValid():
+                    stop_reason = th.GetStopReason()
+                    stop_reason_str = {
+                        lldb.eStopReasonNone: "none",
+                        lldb.eStopReasonTrace: "trace/step",
+                        lldb.eStopReasonBreakpoint: "breakpoint",
+                        lldb.eStopReasonWatchpoint: "watchpoint",
+                        lldb.eStopReasonSignal: "signal",
+                        lldb.eStopReasonException: "exception",
+                        lldb.eStopReasonExec: "exec",
+                        lldb.eStopReasonPlanComplete: "plan-complete",
+                    }.get(stop_reason, f"unknown({stop_reason})")
+                    sys.stderr.write(f"[debuger] Stop reason after launch: {stop_reason_str}\n")
+                    sys.stderr.flush()
+        except Exception as e:
+            sys.stderr.write(f"[debuger] Warning: Could not get stop reason: {e}\n")
+            sys.stderr.flush()
+
         # If we stopped at an unhelpful location (e.g., function epilogue or brace),
         # try a few step-ins to land on a meaningful source line inside main.
         try:
@@ -316,12 +338,35 @@ class LldbAdapter(BaseAdapter):
                     sys.stderr.flush()
                     break
 
+                # Verify thread is still valid before stepping
+                if not th or not th.IsValid():
+                    sys.stderr.write(f"[debuger] Thread became invalid at step {i+1}, stopping\n")
+                    sys.stderr.flush()
+                    break
+
                 path, line, func = self.current_location()
                 if not path or not line:
                     import sys
                     sys.stderr.write(f"[debuger] Step {i+1}/5: No source location, stepping into\n")
                     sys.stderr.flush()
-                    th.StepInto()
+                    try:
+                        th.StepInto()
+                        # Wait for step to complete and check stop reason
+                        if proc and proc.IsValid():
+                            stop_reason = th.GetStopReason()
+                            stop_reason_str = {
+                                lldb.eStopReasonNone: "none",
+                                lldb.eStopReasonTrace: "trace/step",
+                                lldb.eStopReasonBreakpoint: "breakpoint",
+                                lldb.eStopReasonException: "exception",
+                                lldb.eStopReasonSignal: "signal",
+                            }.get(stop_reason, f"unknown({stop_reason})")
+                            sys.stderr.write(f"[debuger] Stop reason after step {i+1}: {stop_reason_str}\n")
+                            sys.stderr.flush()
+                    except Exception as step_ex:
+                        sys.stderr.write(f"[debuger] Exception during step {i+1}: {step_ex}\n")
+                        sys.stderr.flush()
+                        break
                     continue
                 try:
                     # Read the source line and check it's not closing brace / whitespace
@@ -347,10 +392,29 @@ class LldbAdapter(BaseAdapter):
                     sys.stderr.write(f"[debuger] Step {i+1}/5: Exception reading source: {e}\n")
                     sys.stderr.flush()
                     break
-                th.StepInto()
+                try:
+                    th.StepInto()
+                    # Wait for step to complete and check stop reason
+                    if proc and proc.IsValid():
+                        stop_reason = th.GetStopReason()
+                        stop_reason_str = {
+                            lldb.eStopReasonNone: "none",
+                            lldb.eStopReasonTrace: "trace/step",
+                            lldb.eStopReasonBreakpoint: "breakpoint",
+                            lldb.eStopReasonException: "exception",
+                            lldb.eStopReasonSignal: "signal",
+                        }.get(stop_reason, f"unknown({stop_reason})")
+                        sys.stderr.write(f"[debuger] Stop reason after step {i+1}: {stop_reason_str}\n")
+                        sys.stderr.flush()
+                except Exception as step_ex:
+                    sys.stderr.write(f"[debuger] Exception during step {i+1}: {step_ex}\n")
+                    sys.stderr.flush()
+                    break
         except Exception as e:
             import sys
             sys.stderr.write(f"[debuger] Warning: Post-launch stepping failed: {e}\n")
+            import traceback
+            sys.stderr.write(f"[debuger] Traceback: {traceback.format_exc()}\n")
             sys.stderr.flush()
 
     def attach(self, pid: int) -> None:
