@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -10,39 +12,102 @@ from typing import Any, Dict, List, Optional
 from . import BaseAdapter, AdapterError
 
 
-def _lldb_python_path() -> Optional[str]:
-    import shutil
+def _resolve_lldb_exe() -> Optional[Path]:
+    """Find lldb executable, preferring PATH over hardcoded locations."""
     exe = shutil.which("lldb") or shutil.which("lldb.exe")
-    if not exe:
-        exe = str(Path("C:/Program Files/LLVM/bin/lldb.exe"))
-    try:
-        cp = subprocess.run([exe, "-P"], capture_output=True, text=True)
-        if cp.returncode == 0 and cp.stdout.strip():
-            return cp.stdout.strip()
-    except Exception:
-        pass
-    # Fallback
-    candidates = [
-        "C:/Program Files/LLVM/Lib/site-packages",
-        "C:/Program Files/LLVM/lib/site-packages",
-    ]
+    if exe:
+        return Path(exe)
+    fallback = Path("C:/Program Files/LLVM/bin/lldb.exe")
+    return fallback if fallback.exists() else None
+
+
+def _lldb_python_path() -> Optional[str]:
+    """Return LLDB's Python site-packages path.
+
+    Order:
+    1) LLDB_PYTHON_PATH env var if set
+    2) `lldb -P` using the resolved lldb on PATH
+    3) Paths relative to the lldb installation directory
+    4) Last‑resort Windows defaults
+    """
+    # 1) explicit override
+    env_override = os.environ.get("LLDB_PYTHON_PATH")
+    if env_override and Path(env_override).exists():
+        return env_override
+
+    # 2) query lldb -P
+    exe_path = _resolve_lldb_exe()
+    if exe_path:
+        try:
+            cp = subprocess.run([str(exe_path), "-P"], capture_output=True, text=True)
+            if cp.returncode == 0 and cp.stdout.strip():
+                return cp.stdout.strip()
+        except Exception:
+            pass
+
+    # 3) try relative locations next to lldb.exe/bin
+    candidates: List[Path] = []
+    if exe_path:
+        root = exe_path.parent.parent  # …/LLVM
+        pyver = f"python{sys.version_info.major}{sys.version_info.minor}"
+        candidates.extend(
+            [
+                root / "lib" / "site-packages",
+                root / "Lib" / "site-packages",
+                root / "lib" / pyver / "site-packages",
+            ]
+        )
+
+    # 4) Windows defaults (keep as a final fallback)
+    candidates.extend(
+        [
+            Path("C:/Program Files/LLVM/lib/site-packages"),
+            Path("C:/Program Files/LLVM/Lib/site-packages"),
+        ]
+    )
+
     for c in candidates:
-        if Path(c).exists():
-            return c
+        try:
+            if c.exists():
+                return str(c)
+        except Exception:
+            continue
     return None
 
 
 def _find_embedded_python() -> Optional[Path]:
-    bin_dir = Path("C:/Program Files/LLVM/bin")
-    py = bin_dir / "python.exe"
-    if py.exists():
-        return py
-    # search subfolders like python310/python.exe
-    for sub in bin_dir.iterdir():
-        if sub.is_dir() and sub.name.startswith("python3"):
-            cand = sub / "python.exe"
-            if cand.exists():
-                return cand
+    """Locate an embedded Python near the LLDB install, if present.
+
+    Searches the lldb.exe directory and immediate `python3*` subfolders
+    for a `python.exe`. This supports non-default LLVM install roots
+    discovered via PATH.
+    """
+    exe_path = _resolve_lldb_exe()
+    search_dirs: List[Path] = []
+    if exe_path:
+        bin_dir = exe_path.parent
+        search_dirs.append(bin_dir)
+        try:
+            for sub in bin_dir.iterdir():
+                if sub.is_dir() and sub.name.lower().startswith("python3"):
+                    search_dirs.append(sub)
+        except Exception:
+            pass
+    else:
+        default_bin = Path("C:/Program Files/LLVM/bin")
+        if default_bin.exists():
+            search_dirs.append(default_bin)
+            try:
+                for sub in default_bin.iterdir():
+                    if sub.is_dir() and sub.name.lower().startswith("python3"):
+                        search_dirs.append(sub)
+            except Exception:
+                pass
+
+    for d in search_dirs:
+        cand = d / "python.exe"
+        if cand.exists():
+            return cand
     return None
 
 
@@ -57,14 +122,32 @@ class LldbBridgeAdapter(BaseAdapter):
     def _start(self) -> None:
         if self._proc is not None:
             return
-        py = _find_embedded_python()
-        if not py:
-            raise AdapterError("Embedded Python interpreter not found under LLVM/bin")
+        # Prefer embedded python next to lldb; fall back to current interpreter
+        py = _find_embedded_python() or Path(sys.executable)
         lldb_p = _lldb_python_path()
         if not lldb_p:
-            raise AdapterError("Could not determine LLDB Python path (lldb -P)")
+            raise AdapterError("Could not determine LLDB Python path (lldb -P or relative lib)")
         env = os.environ.copy()
         env["PYTHONPATH"] = lldb_p + ";" + env.get("PYTHONPATH", "")
+
+        # Ensure loader finds python3X.dll used by _lldb.pyd by adding likely
+        # directories near lldb.exe to PATH (no-op if absent).
+        exe_path = _resolve_lldb_exe()
+        if exe_path:
+            bin_dir = exe_path.parent
+            dll_dirs: List[Path] = [bin_dir]
+            try:
+                for sub in bin_dir.iterdir():
+                    if sub.is_dir() and sub.name.lower().startswith("python3"):
+                        dll_dirs.append(sub)
+            except Exception:
+                pass
+            for d in dll_dirs:
+                try:
+                    if list(d.glob("python3*.dll")):
+                        env["PATH"] = str(d) + os.pathsep + env.get("PATH", "")
+                except Exception:
+                    pass
         # Invoke server script by file path so embedded Python doesn't need package imports pre-configured
         server = Path(__file__).resolve().parents[1] / "bridge" / "lldb_server.py"
         cmd = [str(py), "-u", str(server)]

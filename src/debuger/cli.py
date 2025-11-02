@@ -112,13 +112,35 @@ def doctor() -> None:
     # Windows-specific hints for LLDB/GDB setup
     if platform.system().lower().startswith("win"):
         pyver = f"python{sys.version_info.major}{sys.version_info.minor}"
-        llvm_dirs = [
-            Path("C:/Program Files/LLVM/lib/site-packages"),
-            Path(f"C:/Program Files/LLVM/lib/{pyver}/site-packages"),
-            Path("C:/Program Files/LLVM/bin/..//lib/site-packages"),
-        ]
-        lldb_candidates = [p for p in llvm_dirs if p.exists()]
-        lldb_exe = Path("C:/Program Files/LLVM/bin/lldb.exe")
+        exe_on_path = shutil.which("lldb") or shutil.which("lldb.exe")
+        lldb_exe_pf = Path("C:/Program Files/LLVM/bin/lldb.exe")
+
+        # Build LLDB Python candidates dynamically
+        lldb_candidates: list[Path] = []
+        if exe_on_path:
+            try:
+                import subprocess as _sp
+                cp = _sp.run([exe_on_path, "-P"], capture_output=True, text=True)
+                if cp.returncode == 0 and cp.stdout.strip():
+                    lldb_candidates.append(Path(cp.stdout.strip()))
+            except Exception:
+                pass
+            root = Path(exe_on_path).parent.parent
+            for c in [
+                root / "lib" / "site-packages",
+                root / "Lib" / "site-packages",
+                root / "lib" / pyver / "site-packages",
+            ]:
+                if c.exists():
+                    lldb_candidates.append(c)
+        else:
+            # fall back to common Windows defaults
+            for c in [
+                Path("C:/Program Files/LLVM/lib/site-packages"),
+                Path(f"C:/Program Files/LLVM/lib/{pyver}/site-packages"),
+            ]:
+                if c.exists():
+                    lldb_candidates.append(c)
 
         console.print("[bold]Hints (Windows)[/]")
         if lldb_candidates:
@@ -129,15 +151,15 @@ def doctor() -> None:
             cmd = f"$env:PYTHONPATH = \"{lldb_candidates[0]}\" + ';' + ($env:PYTHONPATH -as [string])"
             console.print(escape("  " + cmd))
         else:
-            console.print("- Could not locate LLDB Python site-packages under 'C:\\Program Files\\LLVM'.")
-            console.print("  Install LLVM with LLDB and Python bindings enabled.")
+            console.print("- Could not auto-detect LLDB Python site-packages.")
+            console.print("  Ensure LLVM was installed with LLDB Python bindings, or set LLDB_PYTHON_PATH.")
 
-        if not shutil.which("lldb.exe") and lldb_exe.exists():
+        if not (shutil.which("lldb") or shutil.which("lldb.exe")) and lldb_exe_pf.exists():
             console.print("- lldb.exe detected but not on PATH. Add it:")
             console.print(escape('  $env:Path = "C:\\Program Files\\LLVM\\bin" + ";" + $env:Path'))
 
         # Check lldb runtime health (common missing VC++ runtime case)
-        exe = shutil.which("lldb.exe") or (str(lldb_exe) if lldb_exe.exists() else None)
+        exe = shutil.which("lldb") or shutil.which("lldb.exe") or (str(lldb_exe_pf) if lldb_exe_pf.exists() else None)
         if exe:
             try:
                 import subprocess
@@ -404,15 +426,16 @@ def shell(
     # Windows: attempt to auto-configure PATH/PYTHONPATH for LLDB
     if platform.system().lower().startswith("win"):
         try:
-            bin_dir = Path("C:/Program Files/LLVM/bin")
+            exe = shutil.which("lldb") or shutil.which("lldb.exe")
+            bin_dir = Path(exe).parent if exe else Path("C:/Program Files/LLVM/bin")
             if bin_dir.exists():
                 # Prepend bin to PATH
                 os.environ["Path"] = str(bin_dir) + ";" + os.environ.get("Path", "")
-            # Embedded Python folder detection (e.g., python310 extracted here)
-            for sub in bin_dir.iterdir():
-                if sub.is_dir() and sub.name.startswith("python3"):
-                    os.environ["Path"] = str(sub) + ";" + os.environ.get("Path", "")
-                    break
+                # Embedded Python folder detection (e.g., python310 extracted here)
+                for sub in bin_dir.iterdir():
+                    if sub.is_dir() and sub.name.lower().startswith("python3"):
+                        os.environ["Path"] = str(sub) + ";" + os.environ.get("Path", "")
+                        break
         except Exception:
             pass
 

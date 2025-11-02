@@ -7,10 +7,6 @@ import os
 import sys
 import subprocess
 from pathlib import Path
-import sys
-import os
-from pathlib import Path
-import subprocess
 
 
 class AdapterError(RuntimeError):
@@ -89,44 +85,64 @@ def available_adapters() -> List[AdapterInfo]:
 
 
 def _try_enable_lldb_python() -> bool:
-    """Attempt to enable LLDB Python bindings by adjusting sys.path and PATH.
+    """Attempt to enable LLDB Python bindings without assuming a fixed install path.
 
-    - Adds `lldb -P` to sys.path if available
-    - If python3X.dll is missing, prepends common locations (LLVM\bin and subdirs) to PATH
+    Strategy:
+    - Honor `LLDB_PYTHON_PATH` if set.
+    - Use `lldb -P` from the lldb found on PATH.
+    - Add DLL lookup dirs near the resolved `lldb` (bin and `python3*` subdirs) to PATH.
+    - Fall back to well-known Windows locations only if needed.
     Returns True if `import lldb` succeeds after adjustments.
     """
-    # Add lldb's site-packages path
-    exe = shutil.which("lldb") or shutil.which("lldb.exe") or str(Path("C:/Program Files/LLVM/bin/lldb.exe"))
-    if exe and Path(exe).exists():
+    # 0) explicit override for site-packages
+    override = os.environ.get("LLDB_PYTHON_PATH")
+    if override and override not in sys.path and Path(override).exists():
+        sys.path.insert(0, override)
+
+    # 1) add lldb's site-packages path via `lldb -P`
+    exe_path = shutil.which("lldb") or shutil.which("lldb.exe")
+    if not exe_path:
+        fallback = Path("C:/Program Files/LLVM/bin/lldb.exe")
+        if fallback.exists():
+            exe_path = str(fallback)
+    if exe_path and Path(exe_path).exists():
         try:
-            cp = subprocess.run([exe, "-P"], capture_output=True, text=True)
+            cp = subprocess.run([exe_path, "-P"], capture_output=True, text=True)
             if cp.returncode == 0 and cp.stdout.strip():
                 p = cp.stdout.strip()
                 if p and p not in sys.path:
                     sys.path.insert(0, p)
         except Exception:
             pass
-    # Ensure python runtime DLL is discoverable for _lldb.pyd
+
+    # 2) Ensure python runtime DLL is discoverable for _lldb.pyd
     candidates: List[Path] = []
-    bin_dir = Path("C:/Program Files/LLVM/bin")
-    if bin_dir.exists():
-        candidates.append(bin_dir)
-        for child in bin_dir.iterdir():
-            if child.is_dir() and child.name.lower().startswith("python3"):
-                candidates.append(child)
-    # Also include directory of exe, if different
-    if exe:
-        exe_dir = Path(exe).parent
-        if exe_dir.exists() and exe_dir not in candidates:
+    if exe_path:
+        exe_dir = Path(exe_path).parent
+        if exe_dir.exists():
             candidates.append(exe_dir)
-    # Look for python3*.dll
+            try:
+                for child in exe_dir.iterdir():
+                    if child.is_dir() and child.name.lower().startswith("python3"):
+                        candidates.append(child)
+            except Exception:
+                pass
+    # Also try classic Windows layout as a fallback only
+    default_bin = Path("C:/Program Files/LLVM/bin")
+    if default_bin.exists():
+        candidates.append(default_bin)
+        try:
+            for child in default_bin.iterdir():
+                if child.is_dir() and child.name.lower().startswith("python3"):
+                    candidates.append(child)
+        except Exception:
+            pass
     for d in candidates:
         try:
-            dlls = list(d.glob("python3*.dll"))
+            if list(d.glob("python3*.dll")):
+                os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
         except Exception:
-            dlls = []
-        if dlls:
-            os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
+            pass
     # Try import now
     try:
         import importlib
