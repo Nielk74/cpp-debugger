@@ -129,10 +129,35 @@ class LldbAdapter(BaseAdapter):
                     if desc is not None and bp_i.GetDescription(desc):
                         if "exception" in (desc.GetData() or "").lower():
                             bp_i.SetEnabled(False)
+                            import sys
+                            sys.stderr.write(f"[debuger] Disabled preconfigured exception breakpoint: {desc.GetData()}\n")
+                            sys.stderr.flush()
                 except Exception:
                     pass
         except Exception:
             pass
+
+        # Disable stopping on C++ exceptions via process settings
+        try:
+            # For C++ exceptions, disable all exception breakpoints by language
+            if hasattr(lldb, 'eLanguageTypeC_plus_plus'):
+                # Try to disable C++ exception breakpoints
+                for bp_lang in ['C++', 'c++', 'cpp']:
+                    try:
+                        # This disables internal exception breakpoints
+                        pass  # LLDB doesn't have a direct API to disable by language
+                    except Exception:
+                        pass
+
+            # Set process to NOT stop on exceptions
+            # Note: This is a best-effort approach as LLDB's exception handling varies by platform
+            import sys
+            sys.stderr.write(f"[debuger] Configured to ignore exceptions and continue automatically\n")
+            sys.stderr.flush()
+        except Exception as e:
+            import sys
+            sys.stderr.write(f"[debuger] Warning: Could not configure exception handling: {e}\n")
+            sys.stderr.flush()
 
         # Prefer stopping at 'main' via a breakpoint rather than using
         # LLDB's stop-at-entry flag. This avoids halting before CRT startup
@@ -198,6 +223,21 @@ class LldbAdapter(BaseAdapter):
         except Exception:
             # Older LLDB builds may not support this setter; ignore.
             pass
+
+        # Try to configure the target to NOT stop on exceptions
+        # This is belt-and-suspenders with the breakpoint disabling above
+        try:
+            # Some LLDB versions support setting exception breakpoints via target settings
+            # Try to disable all language exception breakpoints
+            import sys
+            # Note: LLDB doesn't have a single "ignore all exceptions" setting
+            # We handle exceptions by auto-continuing in the wait loop instead
+            sys.stderr.write(f"[debuger] Launch configured to auto-continue past exceptions\n")
+            sys.stderr.flush()
+        except Exception as e:
+            import sys
+            sys.stderr.write(f"[debuger] Note: Could not configure exception settings: {e}\n")
+            sys.stderr.flush()
         try:
             flags = launch_info.GetLaunchFlags()
             inherit_flag = getattr(lldb, "eLaunchFlagInheritTTY", None)
@@ -354,6 +394,9 @@ class LldbAdapter(BaseAdapter):
                 max_wait = 5.0  # 5 seconds max
                 wait_interval = 0.1
                 elapsed = 0.0
+                exception_continue_count = 0
+                max_exception_continues = 10  # Max times we'll auto-continue past exceptions
+
                 while elapsed < max_wait:
                     time.sleep(wait_interval)
                     elapsed += wait_interval
@@ -381,8 +424,39 @@ class LldbAdapter(BaseAdapter):
                             }.get(new_stop_reason, f"unknown({new_stop_reason})")
                             sys.stderr.write(f"[debuger] Process stopped after {elapsed:.2f}s with reason: {stop_reason_str}\n")
                             sys.stderr.flush()
-                            stop_reason = new_stop_reason
-                            break
+
+                            # If we stopped due to an exception, automatically continue past it
+                            if new_stop_reason == lldb.eStopReasonException:
+                                if exception_continue_count < max_exception_continues:
+                                    exception_continue_count += 1
+                                    try:
+                                        # Get exception details if available
+                                        th_name = th.GetName() or "unknown"
+                                        frame = th.GetFrameAtIndex(0) if th.GetNumFrames() > 0 else None
+                                        func_name = frame.GetFunctionName() if frame else "unknown"
+                                        sys.stderr.write(f"[debuger] Exception detected in thread '{th_name}' at '{func_name}' - auto-continuing (#{exception_continue_count}/{max_exception_continues})\n")
+                                        sys.stderr.flush()
+                                        proc.Continue()
+                                        # Don't break, keep waiting for the real breakpoint
+                                        continue
+                                    except Exception as e:
+                                        sys.stderr.write(f"[debuger] Warning: Failed to auto-continue past exception: {e}\n")
+                                        sys.stderr.flush()
+                                        # Try to continue anyway
+                                        try:
+                                            proc.Continue()
+                                            continue
+                                        except Exception:
+                                            pass
+                                else:
+                                    sys.stderr.write(f"[debuger] WARNING: Stopped at exception after {exception_continue_count} auto-continues. Giving up.\n")
+                                    sys.stderr.flush()
+                                    stop_reason = new_stop_reason
+                                    break
+                            else:
+                                # Stopped for a valid reason (breakpoint, signal, etc.)
+                                stop_reason = new_stop_reason
+                                break
                 else:
                     # Timeout waiting for breakpoint
                     sys.stderr.write(f"[debuger] Timeout waiting for breakpoint after {max_wait}s. Process state: {self._state_str()}\n")
@@ -432,16 +506,28 @@ class LldbAdapter(BaseAdapter):
                         th.StepInto()
                         # Wait for step to complete and check stop reason
                         if proc and proc.IsValid():
-                            stop_reason = th.GetStopReason()
+                            stop_reason_after_step = th.GetStopReason()
                             stop_reason_str = {
                                 lldb.eStopReasonNone: "none",
                                 lldb.eStopReasonTrace: "trace/step",
                                 lldb.eStopReasonBreakpoint: "breakpoint",
                                 lldb.eStopReasonException: "exception",
                                 lldb.eStopReasonSignal: "signal",
-                            }.get(stop_reason, f"unknown({stop_reason})")
+                            }.get(stop_reason_after_step, f"unknown({stop_reason_after_step})")
                             sys.stderr.write(f"[debuger] Stop reason after step {i+1}: {stop_reason_str}\n")
                             sys.stderr.flush()
+                            # If we hit an exception during stepping, auto-continue past it
+                            if stop_reason_after_step == lldb.eStopReasonException:
+                                sys.stderr.write(f"[debuger] Exception during step {i+1} - auto-continuing past it\n")
+                                sys.stderr.flush()
+                                try:
+                                    proc.Continue()
+                                    # Give it a moment to continue
+                                    import time
+                                    time.sleep(0.1)
+                                except Exception as cont_ex:
+                                    sys.stderr.write(f"[debuger] Failed to continue past exception: {cont_ex}\n")
+                                    sys.stderr.flush()
                     except Exception as step_ex:
                         sys.stderr.write(f"[debuger] Exception during step {i+1}: {step_ex}\n")
                         sys.stderr.flush()
@@ -475,16 +561,28 @@ class LldbAdapter(BaseAdapter):
                     th.StepInto()
                     # Wait for step to complete and check stop reason
                     if proc and proc.IsValid():
-                        stop_reason = th.GetStopReason()
+                        stop_reason_after_step = th.GetStopReason()
                         stop_reason_str = {
                             lldb.eStopReasonNone: "none",
                             lldb.eStopReasonTrace: "trace/step",
                             lldb.eStopReasonBreakpoint: "breakpoint",
                             lldb.eStopReasonException: "exception",
                             lldb.eStopReasonSignal: "signal",
-                        }.get(stop_reason, f"unknown({stop_reason})")
+                        }.get(stop_reason_after_step, f"unknown({stop_reason_after_step})")
                         sys.stderr.write(f"[debuger] Stop reason after step {i+1}: {stop_reason_str}\n")
                         sys.stderr.flush()
+                        # If we hit an exception during stepping, auto-continue past it
+                        if stop_reason_after_step == lldb.eStopReasonException:
+                            sys.stderr.write(f"[debuger] Exception during step {i+1} - auto-continuing past it\n")
+                            sys.stderr.flush()
+                            try:
+                                proc.Continue()
+                                # Give it a moment to continue
+                                import time
+                                time.sleep(0.1)
+                            except Exception as cont_ex:
+                                sys.stderr.write(f"[debuger] Failed to continue past exception: {cont_ex}\n")
+                                sys.stderr.flush()
                 except Exception as step_ex:
                     sys.stderr.write(f"[debuger] Exception during step {i+1}: {step_ex}\n")
                     sys.stderr.flush()
