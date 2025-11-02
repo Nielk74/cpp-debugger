@@ -145,8 +145,17 @@ class LldbAdapter(BaseAdapter):
                     br.SetOneShot(True)
                     bp_set = True
                     import sys
-                    sys.stderr.write(f"[debuger] Breakpoint set on 'main' (ID: {br.GetID()})\n")
+                    num_locs = br.GetNumLocations()
+                    sys.stderr.write(f"[debuger] Breakpoint set on 'main' (ID: {br.GetID()}, locations: {num_locs})\n")
                     sys.stderr.flush()
+                    # If breakpoint has no locations, it won't be hit
+                    if num_locs == 0:
+                        sys.stderr.write(f"[debuger] WARNING: Breakpoint on 'main' has 0 locations - it won't be hit!\n")
+                        sys.stderr.write(f"[debuger] This usually means:\n")
+                        sys.stderr.write(f"[debuger]   1. The binary has no debug symbols (compile with -g)\n")
+                        sys.stderr.write(f"[debuger]   2. The function is named differently (e.g., wmain, WinMain)\n")
+                        sys.stderr.write(f"[debuger]   3. The symbols haven't been loaded yet\n")
+                        sys.stderr.flush()
                 else:
                     import sys
                     sys.stderr.write(f"[debuger] Warning: Failed to set breakpoint on 'main', trying regex fallback\n")
@@ -165,8 +174,12 @@ class LldbAdapter(BaseAdapter):
                         try:
                             br2.SetOneShot(True)
                             import sys
-                            sys.stderr.write(f"[debuger] Regex breakpoint set on main pattern (ID: {br2.GetID()})\n")
+                            num_locs = br2.GetNumLocations()
+                            sys.stderr.write(f"[debuger] Regex breakpoint set on main pattern (ID: {br2.GetID()}, locations: {num_locs})\n")
                             sys.stderr.flush()
+                            if num_locs == 0:
+                                sys.stderr.write(f"[debuger] WARNING: Regex breakpoint also has 0 locations!\n")
+                                sys.stderr.flush()
                         except Exception:
                             pass
                     else:
@@ -304,6 +317,7 @@ class LldbAdapter(BaseAdapter):
         sys.stderr.flush()
 
         # Log stop reason to verify we actually hit the breakpoint
+        stop_reason = lldb.eStopReasonNone
         try:
             if proc and proc.IsValid():
                 th = proc.selected_thread
@@ -324,6 +338,71 @@ class LldbAdapter(BaseAdapter):
         except Exception as e:
             sys.stderr.write(f"[debuger] Warning: Could not get stop reason: {e}\n")
             sys.stderr.flush()
+
+        # If stop reason is 'none', the breakpoint wasn't hit yet.
+        # This can happen if the process launched but hasn't reached main yet,
+        # or if the breakpoint failed to be set. Try to continue to the breakpoint.
+        if stop_reason == lldb.eStopReasonNone and stop_at_entry:
+            sys.stderr.write(f"[debuger] Stop reason is 'none' - breakpoint not hit yet. Attempting to continue to breakpoint...\n")
+            sys.stderr.flush()
+            try:
+                # Continue execution to hit the breakpoint
+                proc.Continue()
+
+                # Wait a moment for the breakpoint to be hit (with timeout)
+                import time
+                max_wait = 5.0  # 5 seconds max
+                wait_interval = 0.1
+                elapsed = 0.0
+                while elapsed < max_wait:
+                    time.sleep(wait_interval)
+                    elapsed += wait_interval
+
+                    # Check current state
+                    current_state = self._state_str()
+                    if current_state in ("exited", "crashed"):
+                        sys.stderr.write(f"[debuger] Process {current_state} while waiting for breakpoint. It may have run to completion or crashed before reaching main.\n")
+                        sys.stderr.flush()
+                        # Don't try to step if already exited
+                        return
+
+                    # Check if we stopped (should be at breakpoint now)
+                    if current_state == "stopped":
+                        th = proc.selected_thread
+                        if th and th.IsValid():
+                            new_stop_reason = th.GetStopReason()
+                            stop_reason_str = {
+                                lldb.eStopReasonNone: "none",
+                                lldb.eStopReasonTrace: "trace/step",
+                                lldb.eStopReasonBreakpoint: "breakpoint",
+                                lldb.eStopReasonWatchpoint: "watchpoint",
+                                lldb.eStopReasonSignal: "signal",
+                                lldb.eStopReasonException: "exception",
+                            }.get(new_stop_reason, f"unknown({new_stop_reason})")
+                            sys.stderr.write(f"[debuger] Process stopped after {elapsed:.2f}s with reason: {stop_reason_str}\n")
+                            sys.stderr.flush()
+                            stop_reason = new_stop_reason
+                            break
+                else:
+                    # Timeout waiting for breakpoint
+                    sys.stderr.write(f"[debuger] Timeout waiting for breakpoint after {max_wait}s. Process state: {self._state_str()}\n")
+                    sys.stderr.flush()
+                    # If still running, don't try to step
+                    if self._state_str() != "stopped":
+                        return
+            except Exception as e:
+                sys.stderr.write(f"[debuger] Exception while continuing to breakpoint: {e}\n")
+                import traceback
+                sys.stderr.write(f"[debuger] Traceback: {traceback.format_exc()}\n")
+                sys.stderr.flush()
+                # If we can't continue, don't try to step
+                return
+
+        # If we still don't have a proper stop reason, don't try to step
+        if stop_reason == lldb.eStopReasonNone:
+            sys.stderr.write(f"[debuger] Stop reason is still 'none' - skipping post-launch stepping to avoid premature exit\n")
+            sys.stderr.flush()
+            return
 
         # If we stopped at an unhelpful location (e.g., function epilogue or brace),
         # try a few step-ins to land on a meaningful source line inside main.
